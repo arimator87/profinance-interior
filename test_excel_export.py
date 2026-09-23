@@ -10,7 +10,7 @@ import io
 from datetime import datetime
 
 # Configuration
-BASE_URL = "https://profinance-interior-3.preview.emergentagent.com/api"
+BASE_URL = "https://join-interior-setup.preview.emergentagent.com/api"
 PREMIUM_EMAIL = "furnitrue.mail@gmail.com"
 PREMIUM_PASSWORD = "Password123"
 EXISTING_PROJECT_ID = "c420b3e7-cd4a-4cad-93cb-e9385960d4f5"
