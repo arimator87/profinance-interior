@@ -38,7 +38,7 @@ from auth import (
     reset_password_with_phone,
 )
 from storage import init_storage, put_object, get_object, APP_NAME, MIME_TYPES
-from pdf_report import build_report_pdf, build_progress_pdf, build_rab_pdf, build_invoice_pdf
+from pdf_report import build_report_pdf, build_progress_pdf, build_rab_pdf, build_invoice_pdf, build_worker_pdf, build_workers_pdf
 from excel_report import build_project_recap_xlsx
 import backup as backup_mod
 
@@ -2313,6 +2313,50 @@ async def progress_pdf(project_id: str, request: Request, auth: Optional[str] = 
         iter([pdf_bytes]),
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="Laporan-Progress-{safe_name}.pdf"'},
+    )
+
+@api.get("/projects/{project_id}/workers/report/pdf")
+async def workers_report_pdf(project_id: str, request: Request, auth: Optional[str] = Query(None)):
+    """Laporan PDF keseluruhan tukang dalam satu proyek (premium)."""
+    user = await _user_from_request_or_query(request, auth)
+    await require_premium(user)
+    p = await get_owned_project(project_id, user)
+    workers_raw = await db.workers.find({"project_id": project_id}, {"_id": 0}).sort("createdAt", 1).to_list(2000)
+    workers = [await compute_worker(w) for w in workers_raw]
+    pdf_bytes = build_workers_pdf(p, workers)
+    safe_name = "".join(c for c in p.get("name", "proyek") if c.isalnum() or c in " -_")[:40].strip() or "proyek"
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="Laporan-Tukang-{safe_name}.pdf"'},
+    )
+
+
+@api.get("/workers/{worker_id}/report/pdf")
+async def worker_report_pdf(worker_id: str, request: Request, auth: Optional[str] = Query(None)):
+    """Laporan PDF per tukang: ringkasan borongan + riwayat kasbon/pelunasan (premium)."""
+    user = await _user_from_request_or_query(request, auth)
+    await require_premium(user)
+    worker = await db.workers.find_one({"id": worker_id}, {"_id": 0})
+    if not worker:
+        raise HTTPException(status_code=404, detail="Tukang tidak ditemukan")
+    p = await get_owned_project(worker["project_id"], user)
+    wc = await compute_worker(worker)
+    name = worker["name"]
+    payments = await db.transactions.find(
+        {
+            "project_id": worker["project_id"],
+            "type": "out",
+            "category": {"$in": [f"Kasbon Tukang {name}", f"Pelunasan Tukang {name}"]},
+        },
+        {"_id": 0},
+    ).sort("date", 1).to_list(5000)
+    pdf_bytes = build_worker_pdf(p, wc, payments)
+    safe_name = "".join(c for c in name if c.isalnum() or c in " -_")[:40].strip() or "tukang"
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="Laporan-Tukang-{safe_name}.pdf"'},
     )
 
 

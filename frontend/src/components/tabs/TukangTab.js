@@ -1,5 +1,7 @@
 import { useState } from "react";
-import { api } from "@/lib/api";
+import { useNavigate } from "react-router-dom";
+import { api, workersPdfUrl, workerPdfUrl } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -10,11 +12,13 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Plus, HardHat, Loader2, Trash2, Wallet, HandCoins, CheckCircle2, Pencil } from "lucide-react";
+import { Plus, HardHat, Loader2, Trash2, Wallet, HandCoins, CheckCircle2, Pencil, FileDown, Lock } from "lucide-react";
 import { rupiah } from "@/lib/format";
 import { toast } from "sonner";
 
 export function TukangTab({ project, workers, onChange }) {
+  const { isPremium } = useAuth();
+  const navigate = useNavigate();
   const [addOpen, setAddOpen] = useState(false);
   const [form, setForm] = useState({ name: "", borongan: "" });
   const [editWorkerId, setEditWorkerId] = useState(null);
@@ -60,13 +64,29 @@ export function TukangTab({ project, workers, onChange }) {
     catch { toast.error("Gagal menghapus"); }
   };
 
+  const openPdf = (url) => {
+    if (!isPremium) {
+      toast.error("Laporan PDF tukang adalah fitur Premium");
+      navigate("/pricing");
+      return;
+    }
+    window.open(url, "_blank");
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <h3 className="font-display font-bold text-lg text-slate-900">Kasbon & Tukang</h3>
-        <Button data-testid="btn-add-tukang" size="sm" onClick={openAdd} className="bg-amber-600 hover:bg-amber-700 text-white gap-1.5">
-          <Plus className="w-4 h-4" /> Tukang
-        </Button>
+        <div className="flex items-center gap-2">
+          {workers.length > 0 && (
+            <Button data-testid="btn-workers-pdf" size="sm" variant="outline" onClick={() => openPdf(workersPdfUrl(project.id))} className="gap-1.5 border-amber-300 text-amber-700 hover:bg-amber-50">
+              <FileDown className="w-4 h-4" /> PDF Semua {!isPremium && <Lock className="w-3 h-3 text-amber-500" />}
+            </Button>
+          )}
+          <Button data-testid="btn-add-tukang" size="sm" onClick={openAdd} className="bg-amber-600 hover:bg-amber-700 text-white gap-1.5">
+            <Plus className="w-4 h-4" /> Tukang
+          </Button>
+        </div>
       </div>
 
       {workers.length === 0 ? (
@@ -90,6 +110,7 @@ export function TukangTab({ project, workers, onChange }) {
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
+                    <button data-testid={`pdf-worker-${w.id}`} title="Unduh laporan PDF tukang ini" onClick={() => openPdf(workerPdfUrl(w.id))} className="text-slate-300 hover:text-amber-600"><FileDown className="w-4 h-4" /></button>
                     <button data-testid={`edit-worker-${w.id}`} onClick={() => openEdit(w)} className="text-slate-300 hover:text-amber-600"><Pencil className="w-4 h-4" /></button>
                     <AlertDialog>
                       <AlertDialogTrigger asChild><button data-testid={`delete-worker-${w.id}`} className="text-slate-300 hover:text-red-500"><Trash2 className="w-4 h-4" /></button></AlertDialogTrigger>

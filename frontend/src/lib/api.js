@@ -54,3 +54,13 @@ export function recapXlsxUrl(projectId) {
   const token = localStorage.getItem("pf_token");
   return `${API}/projects/${projectId}/recap/xlsx?auth=${encodeURIComponent(token || "")}`;
 }
+
+export function workersPdfUrl(projectId) {
+  const token = localStorage.getItem("pf_token");
+  return `${API}/projects/${projectId}/workers/report/pdf?auth=${encodeURIComponent(token || "")}`;
+}
+
+export function workerPdfUrl(workerId) {
+  const token = localStorage.getItem("pf_token");
+  return `${API}/workers/${workerId}/report/pdf?auth=${encodeURIComponent(token || "")}`;
+}

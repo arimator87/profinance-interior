@@ -1181,3 +1181,312 @@ def build_invoice_pdf(invoice, computed):
     doc.build(story, onFirstPage=_inv_footer, onLaterPages=_inv_footer)
     buf.seek(0)
     return buf.read()
+
+
+# =====================================================================
+# Laporan Upah Tukang (per tukang & keseluruhan)
+# =====================================================================
+
+def _worker_page_decor(company, subtitle):
+    """Header/footer band style shared by worker reports (matches build_report_pdf)."""
+    published = datetime.now().strftime("%d/%m/%Y, %H.%M")
+
+    def draw_page(canvas, doc):
+        w, h = A4
+        canvas.setFillColor(INK)
+        canvas.rect(0, h - 22 * mm, w, 22 * mm, fill=1, stroke=0)
+        canvas.setFillColor(AMBER)
+        canvas.setFont("Helvetica-Bold", 13)
+        canvas.drawString(15 * mm, h - 12 * mm, company)
+        canvas.setFillColor(colors.HexColor("#CBD5E1"))
+        canvas.setFont("Helvetica", 7.5)
+        canvas.drawString(15 * mm, h - 17 * mm, subtitle)
+        canvas.setFillColor(INK)
+        canvas.rect(0, 0, w, 12 * mm, fill=1, stroke=0)
+        canvas.setFillColor(colors.HexColor("#CBD5E1"))
+        canvas.setFont("Helvetica", 7)
+        canvas.drawString(15 * mm, 4.6 * mm, f"{company}  \u2022  {subtitle.title()}")
+        canvas.drawRightString(w - 15 * mm, 4.6 * mm, f"Diterbitkan: {published}  \u2022  Hal {canvas.getPageNumber()}")
+
+    return draw_page
+
+
+def _worker_styles():
+    styles = getSampleStyleSheet()
+    return {
+        "kick": ParagraphStyle("wkick", parent=styles["Normal"], fontSize=9, textColor=AMBER, spaceAfter=2, fontName="Helvetica-Bold"),
+        "title": ParagraphStyle("wtitle", parent=styles["Normal"], fontSize=24, leading=28, textColor=INK, fontName="Helvetica-Bold", spaceAfter=2),
+        "sub": ParagraphStyle("wsub", parent=styles["Normal"], fontSize=11.5, leading=15, textColor=SLATE, spaceAfter=8),
+        "sec": ParagraphStyle("wsec", parent=styles["Normal"], fontSize=12, textColor=INK, fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=6),
+        "cell": ParagraphStyle("wcell", parent=styles["Normal"], fontSize=8.5, leading=11, textColor=INK),
+        "cellb": ParagraphStyle("wcellb", parent=styles["Normal"], fontSize=8.5, leading=11, textColor=INK, fontName="Helvetica-Bold"),
+        "num": ParagraphStyle("wnum", parent=styles["Normal"], fontSize=8.5, leading=11, textColor=INK, alignment=TA_RIGHT),
+        "numb": ParagraphStyle("wnumb", parent=styles["Normal"], fontSize=8.5, leading=11, textColor=INK, fontName="Helvetica-Bold", alignment=TA_RIGHT),
+        "small": ParagraphStyle("wsmall", parent=styles["Normal"], fontSize=8, leading=11, textColor=SLATE),
+        "sig": ParagraphStyle("wsig", parent=styles["Normal"], fontSize=9, leading=13, textColor=INK, alignment=TA_CENTER),
+    }
+
+
+def _metric_cards(items, content_w):
+    """items: list of (label, value, hex_color) -> 1-row card table."""
+    cells = []
+    for label, value, hexcol in items:
+        cells.append(Paragraph(
+            f"<font size=7.5 color='#94A3B8'>{label}</font><br/>"
+            f"<font size=12.5 color='{hexcol}'><b>{value}</b></font>",
+            ParagraphStyle("mc", fontName="Helvetica", fontSize=9, leading=15, textColor=INK),
+        ))
+    n = len(items)
+    t = Table([cells], colWidths=[content_w / n] * n)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), BG),
+        ("BOX", (0, 0), (-1, -1), 0.6, LINE),
+        ("INNERGRID", (0, 0), (-1, -1), 0.6, LINE),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    return t
+
+
+def _section_bar(title, content_w):
+    t = Table([[Paragraph(title, ParagraphStyle("s", fontSize=12, textColor=INK, fontName="Helvetica-Bold"))]], colWidths=[content_w])
+    t.setStyle(TableStyle([
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 12), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, -1), 2, AMBER),
+    ]))
+    return t
+
+
+def build_worker_pdf(project, worker, payments):
+    """Laporan upah SATU tukang: ringkasan borongan + riwayat kasbon/pelunasan + tanda terima."""
+    company = (project.get("companyName") or "ProFinance Interior").upper()
+    draw_page = _worker_page_decor(company, "LAPORAN UPAH TUKANG")
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=15 * mm, rightMargin=15 * mm, topMargin=28 * mm, bottomMargin=16 * mm,
+    )
+    content_w = A4[0] - 30 * mm
+    st = _worker_styles()
+    story = []
+
+    borongan = worker.get("borongan", 0) or 0
+    kasbon = worker.get("totalKasbon", 0)
+    pelunasan = worker.get("totalPelunasan", 0)
+    dibayar = worker.get("totalDibayar", kasbon + pelunasan)
+    sisa = worker.get("sisaHutang", borongan - dibayar)
+    lunas = sisa <= 0 and borongan > 0
+    paid_pct = min(100.0, (dibayar / borongan * 100.0)) if borongan > 0 else 0.0
+
+    # ---- Title block
+    story.append(Spacer(1, 6))
+    story.append(Paragraph("LAPORAN UPAH TUKANG", st["kick"]))
+    story.append(Paragraph(worker.get("name", "-"), st["title"]))
+    story.append(Paragraph(
+        f"<b>Proyek:</b> {project.get('name', '-')} &nbsp;&nbsp;&bull;&nbsp;&nbsp; "
+        f"<b>Owner/Klien:</b> {project.get('owner') or '-'}", st["sub"]))
+
+    # ---- Metric cards
+    story.append(_metric_cards([
+        ("NILAI BORONGAN", rupiah(borongan), "#0F172A"),
+        ("TOTAL KASBON", rupiah(kasbon), "#D97706"),
+        ("TOTAL PELUNASAN", rupiah(pelunasan), "#2563EB"),
+        ("TOTAL DIBAYAR", rupiah(dibayar), "#16A34A"),
+        ("SISA HUTANG", rupiah(max(sisa, 0)), "#B45309" if not lunas else "#15803D"),
+    ], content_w))
+    story.append(Spacer(1, 8))
+
+    # ---- Status + progress
+    status_txt = "LUNAS" if lunas else "BELUM LUNAS"
+    status_col = GREEN if lunas else AMBER
+    status_tbl = Table([[
+        Paragraph(f"<b>Status Pembayaran: <font color='{'#15803D' if lunas else '#B45309'}'>{status_txt}</font></b>"
+                  f" &nbsp;\u2022&nbsp; {paid_pct:.0f}% borongan terbayar", st["cell"]),
+        _bar(content_w * 0.42, paid_pct / 100.0, status_col, h=8),
+    ]], colWidths=[content_w * 0.56, content_w * 0.44])
+    status_tbl.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.append(status_tbl)
+
+    # ---- Payment history
+    story.append(_section_bar("RIWAYAT PEMBAYARAN", content_w))
+    cw = [content_w * 0.06, content_w * 0.14, content_w * 0.44, content_w * 0.14, content_w * 0.22]
+    rows = [[Paragraph("NO", st["cellb"]), Paragraph("TANGGAL", st["cellb"]),
+             Paragraph("KETERANGAN", st["cellb"]), Paragraph("TIPE", st["cellb"]),
+             Paragraph("JUMLAH", st["numb"])]]
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), INK),
+        ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+    ]
+    if not payments:
+        rows.append([Paragraph("-", st["cell"]), Paragraph("-", st["cell"]),
+                     Paragraph("Belum ada pembayaran tercatat", st["cell"]),
+                     Paragraph("-", st["cell"]), Paragraph(rupiah(0), st["num"])])
+    else:
+        for i, t in enumerate(payments, start=1):
+            tipe = "Kasbon" if str(t.get("category", "")).startswith("Kasbon") else "Pelunasan"
+            rows.append([
+                Paragraph(str(i), st["cell"]),
+                Paragraph(_fmt(t.get("date")), st["cell"]),
+                Paragraph(t.get("description") or "-", st["cell"]),
+                Paragraph(tipe, st["cell"]),
+                Paragraph(rupiah(t.get("amount", 0)), st["num"]),
+            ])
+            style_cmds.append(("LINEBELOW", (0, i), (-1, i), 0.4, LINE))
+    # total row
+    last = len(rows)
+    rows.append([Paragraph("", st["cellb"]), Paragraph("", st["cellb"]),
+                 Paragraph("TOTAL DIBAYAR", st["cellb"]), Paragraph("", st["cellb"]),
+                 Paragraph(rupiah(dibayar), st["numb"])])
+    style_cmds += [
+        ("BACKGROUND", (0, last), (-1, last), AMBER_L),
+        ("LINEABOVE", (0, last), (-1, last), 0.8, AMBER),
+        ("BOX", (0, 0), (-1, -1), 0.6, LINE),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.6, INK),
+    ]
+    tbl = Table(rows, colWidths=cw, repeatRows=1)
+    tbl.setStyle(TableStyle(style_cmds))
+    story.append(tbl)
+    story.append(Spacer(1, 6))
+    story.append(Paragraph("<i>Terbilang total dibayar: " + _terbilang(dibayar) + "</i>", st["small"]))
+    if sisa > 0:
+        story.append(Paragraph(
+            f"<i>Sisa hutang kepada tukang sebesar <b>{rupiah(sisa)}</b> ({_terbilang(sisa)}).</i>", st["small"]))
+    story.append(Spacer(1, 18))
+
+    # ---- Signature block (tanda terima)
+    company_label = project.get("companyName") or "Kontraktor"
+    col_w = content_w / 2
+    sig_left = Paragraph(f"Dibuat oleh,<br/><br/><br/><br/>________________________<br/><b>{company_label}</b>", st["sig"])
+    sig_right = Paragraph(f"Diterima oleh,<br/><br/><br/><br/>________________________<br/><b>{worker.get('name', 'Tukang')}</b>", st["sig"])
+    sig = Table([[sig_left, sig_right]], colWidths=[col_w, col_w])
+    sig.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    story.append(sig)
+
+    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
+    buf.seek(0)
+    return buf.read()
+
+
+def build_workers_pdf(project, workers):
+    """Laporan KESELURUHAN tukang dalam satu proyek: rekap borongan, pembayaran & sisa hutang."""
+    company = (project.get("companyName") or "ProFinance Interior").upper()
+    draw_page = _worker_page_decor(company, "LAPORAN KESELURUHAN TUKANG")
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=15 * mm, rightMargin=15 * mm, topMargin=28 * mm, bottomMargin=16 * mm,
+    )
+    content_w = A4[0] - 30 * mm
+    st = _worker_styles()
+    story = []
+
+    tot_borongan = sum(w.get("borongan", 0) or 0 for w in workers)
+    tot_kasbon = sum(w.get("totalKasbon", 0) for w in workers)
+    tot_pelunasan = sum(w.get("totalPelunasan", 0) for w in workers)
+    tot_dibayar = sum(w.get("totalDibayar", 0) for w in workers)
+    tot_sisa = sum(max(w.get("sisaHutang", 0), 0) for w in workers)
+    n_lunas = sum(1 for w in workers if w.get("sisaHutang", 1) <= 0 and (w.get("borongan", 0) or 0) > 0)
+    paid_pct = min(100.0, (tot_dibayar / tot_borongan * 100.0)) if tot_borongan > 0 else 0.0
+
+    # ---- Title block
+    story.append(Spacer(1, 6))
+    story.append(Paragraph("LAPORAN KESELURUHAN TUKANG", st["kick"]))
+    story.append(Paragraph(project.get("name", "-"), st["title"]))
+    story.append(Paragraph(
+        f"<b>Owner/Klien:</b> {project.get('owner') or '-'} &nbsp;&nbsp;&bull;&nbsp;&nbsp; "
+        f"<b>Jumlah Tukang:</b> {len(workers)} &nbsp;&nbsp;&bull;&nbsp;&nbsp; "
+        f"<b>Lunas:</b> {n_lunas} tukang", st["sub"]))
+
+    # ---- Metric cards
+    story.append(_metric_cards([
+        ("TOTAL BORONGAN", rupiah(tot_borongan), "#0F172A"),
+        ("TOTAL KASBON", rupiah(tot_kasbon), "#D97706"),
+        ("TOTAL PELUNASAN", rupiah(tot_pelunasan), "#2563EB"),
+        ("TOTAL DIBAYAR", rupiah(tot_dibayar), "#16A34A"),
+        ("TOTAL SISA HUTANG", rupiah(tot_sisa), "#B45309"),
+    ], content_w))
+    story.append(Spacer(1, 8))
+
+    status_tbl = Table([[
+        Paragraph(f"<b>{paid_pct:.0f}%</b> dari total nilai borongan sudah dibayarkan", st["cell"]),
+        _bar(content_w * 0.42, paid_pct / 100.0, GREEN if paid_pct >= 100 else AMBER, h=8),
+    ]], colWidths=[content_w * 0.56, content_w * 0.44])
+    status_tbl.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.append(status_tbl)
+
+    # ---- Workers table
+    story.append(_section_bar("REKAP PEMBAYARAN PER TUKANG", content_w))
+    cw = [content_w * 0.05, content_w * 0.24, content_w * 0.15, content_w * 0.13,
+          content_w * 0.13, content_w * 0.15, content_w * 0.15]
+    rows = [[Paragraph("NO", st["cellb"]), Paragraph("NAMA TUKANG", st["cellb"]),
+             Paragraph("BORONGAN", st["numb"]), Paragraph("KASBON", st["numb"]),
+             Paragraph("PELUNASAN", st["numb"]), Paragraph("SISA HUTANG", st["numb"]),
+             Paragraph("STATUS", st["cellb"])]]
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), INK),
+        ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+    ]
+    if not workers:
+        rows.append([Paragraph("-", st["cell"]), Paragraph("Belum ada tukang", st["cell"]),
+                     Paragraph(rupiah(0), st["num"]), Paragraph(rupiah(0), st["num"]),
+                     Paragraph(rupiah(0), st["num"]), Paragraph(rupiah(0), st["num"]),
+                     Paragraph("-", st["cell"])])
+    else:
+        for i, w in enumerate(workers, start=1):
+            sisa_w = w.get("sisaHutang", 0)
+            lunas_w = sisa_w <= 0 and (w.get("borongan", 0) or 0) > 0
+            rows.append([
+                Paragraph(str(i), st["cell"]),
+                Paragraph(w.get("name", "-"), st["cell"]),
+                Paragraph(rupiah(w.get("borongan", 0) or 0), st["num"]),
+                Paragraph(rupiah(w.get("totalKasbon", 0)), st["num"]),
+                Paragraph(rupiah(w.get("totalPelunasan", 0)), st["num"]),
+                Paragraph(rupiah(max(sisa_w, 0)), st["num"]),
+                Paragraph(f"<font color='{'#15803D' if lunas_w else '#B45309'}'><b>{'LUNAS' if lunas_w else 'BELUM'}</b></font>", st["cell"]),
+            ])
+            style_cmds.append(("LINEBELOW", (0, i), (-1, i), 0.4, LINE))
+            if i % 2 == 0:
+                style_cmds.append(("BACKGROUND", (0, i), (-1, i), BG))
+    last = len(rows)
+    rows.append([Paragraph("", st["cellb"]), Paragraph("TOTAL", st["cellb"]),
+                 Paragraph(rupiah(tot_borongan), st["numb"]), Paragraph(rupiah(tot_kasbon), st["numb"]),
+                 Paragraph(rupiah(tot_pelunasan), st["numb"]), Paragraph(rupiah(tot_sisa), st["numb"]),
+                 Paragraph("", st["cellb"])])
+    style_cmds += [
+        ("BACKGROUND", (0, last), (-1, last), AMBER_L),
+        ("LINEABOVE", (0, last), (-1, last), 0.8, AMBER),
+        ("BOX", (0, 0), (-1, -1), 0.6, LINE),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.6, INK),
+    ]
+    tbl = Table(rows, colWidths=cw, repeatRows=1)
+    tbl.setStyle(TableStyle(style_cmds))
+    story.append(tbl)
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        "<i>Total dibayar (kasbon + pelunasan): " + rupiah(tot_dibayar) + " \u2014 " + _terbilang(tot_dibayar) + ".</i>",
+        st["small"]))
+    story.append(Paragraph(
+        "<i>Rincian riwayat pembayaran per tukang tersedia pada laporan individu masing-masing tukang.</i>",
+        st["small"]))
+
+    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
+    buf.seek(0)
+    return buf.read()
