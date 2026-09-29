@@ -872,18 +872,21 @@ async def admin_manual_orders_count(user: dict = Depends(require_admin)):
 
 @api.get("/admin/manual-orders")
 async def admin_manual_orders(status: str = "pending_review", user: dict = Depends(require_admin)):
-    """Daftar order pembayaran manual untuk diverifikasi admin."""
+    """Daftar order pembayaran manual untuk diverifikasi admin.
+    status: 'pending_review' (default), 'resolved' (paid+rejected), 'paid', 'rejected', atau 'all'."""
     q = {"payment_method": "manual"}
-    if status and status != "all":
+    if status == "resolved":
+        q["status"] = {"$in": ["paid", "rejected"]}
+    elif status and status != "all":
         q["status"] = status
     orders = await db.orders.find(q, {"_id": 0, "last_notification": 0, "snap_token": 0, "redirect_url": 0}).sort("created_at", -1).to_list(200)
     uids = list({o["user_id"] for o in orders})
-    users = await db.users.find({"user_id": {"$in": uids}}, {"_id": 0, "user_id": 1, "name": 1, "email": 1}).to_list(500) if uids else []
+    users = await db.users.find({"user_id": {"$in": uids}}, {"_id": 0, "user_id": 1, "name": 1, "email": 1, "phone": 1}).to_list(500) if uids else []
     umap = {u["user_id"]: u for u in users}
     out = []
     for o in orders:
         u = umap.get(o["user_id"], {})
-        out.append({**o, "userName": u.get("name", ""), "userEmail": u.get("email", "")})
+        out.append({**o, "userName": u.get("name", ""), "userEmail": u.get("email", ""), "userPhone": u.get("phone", "")})
     return out
 
 
@@ -916,7 +919,7 @@ async def admin_reject_order(order_id: str, user: dict = Depends(require_admin))
         raise HTTPException(status_code=400, detail="Order sudah lunas, tidak dapat ditolak")
     await db.orders.update_one(
         {"order_id": order_id},
-        {"$set": {"status": "rejected", "rejectedBy": user.get("email")}},
+        {"$set": {"status": "rejected", "rejectedBy": user.get("email"), "rejectedAt": now_iso()}},
     )
     return {"ok": True}
 

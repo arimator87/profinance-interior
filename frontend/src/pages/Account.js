@@ -17,6 +17,8 @@ import {
 const STATUS = {
   paid: { label: "Lunas", cls: "bg-green-100 text-green-700", icon: CheckCircle2 },
   pending: { label: "Menunggu", cls: "bg-amber-100 text-amber-700", icon: Clock },
+  pending_review: { label: "Menunggu Verifikasi", cls: "bg-blue-100 text-blue-700", icon: Clock },
+  rejected: { label: "Ditolak", cls: "bg-red-100 text-red-600", icon: XCircle },
   expire: { label: "Kedaluwarsa", cls: "bg-slate-100 text-slate-500", icon: XCircle },
   cancel: { label: "Dibatalkan", cls: "bg-slate-100 text-slate-500", icon: XCircle },
   deny: { label: "Ditolak", cls: "bg-red-100 text-red-600", icon: XCircle },
@@ -137,6 +139,8 @@ export default function Account() {
 
   const expiry = user?.subscriptionExpiry ? new Date(user.subscriptionExpiry) : null;
   const daysLeft = expiry ? Math.ceil((expiry - new Date()) / 86400000) : null;
+  const pendingManual = orders.find((o) => o.payment_method === "manual" && o.status === "pending_review");
+  const rejectedManual = orders.find((o) => o.payment_method === "manual" && o.status === "rejected");
 
   return (
     <div className="min-h-screen bg-slate-50 pf-grain">
@@ -176,7 +180,43 @@ export default function Account() {
           </div>
         </Card>
 
-        {/* Backup Data */}
+        {/* Status pembayaran manual (QRIS) */}
+        {pendingManual && (
+          <Card className="p-4 mb-6 border-blue-200 bg-blue-50/70" data-testid="manual-pending-banner">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-lg bg-blue-100 flex items-center justify-center shrink-0">
+                <Clock className="w-5 h-5 text-blue-600" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="font-semibold text-blue-900 text-sm">Pembayaran sedang diverifikasi</h3>
+                <p className="text-xs text-blue-700 mt-0.5">
+                  Bukti pembayaran Anda untuk <b>{PLAN_LABEL[pendingManual.plan] || pendingManual.plan}</b> ({rupiah(pendingManual.gross_amount)}) telah kami terima.
+                  Admin akan memverifikasi maksimal 1×24 jam. Premium otomatis aktif setelah disetujui — Anda tidak perlu membayar lagi.
+                </p>
+              </div>
+            </div>
+          </Card>
+        )}
+        {!pendingManual && rejectedManual && !isPremium && (
+          <Card className="p-4 mb-6 border-red-200 bg-red-50/70" data-testid="manual-rejected-banner">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-lg bg-red-100 flex items-center justify-center shrink-0">
+                <XCircle className="w-5 h-5 text-red-600" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="font-semibold text-red-900 text-sm">Bukti pembayaran ditolak</h3>
+                <p className="text-xs text-red-700 mt-0.5">
+                  Bukti pembayaran Anda untuk <b>{PLAN_LABEL[rejectedManual.plan] || rejectedManual.plan}</b> belum dapat diverifikasi.
+                  Silakan periksa kembali nominal & bukti transfer, lalu unggah ulang.
+                </p>
+                <Button size="sm" data-testid="manual-retry-btn" onClick={() => navigate("/pricing")} className="mt-2 h-8 text-xs bg-red-600 hover:bg-red-700 text-white gap-1">
+                  <Crown className="w-3.5 h-3.5" /> Unggah Ulang Bukti
+                </Button>
+              </div>
+            </div>
+          </Card>
+        )}
+
         <Card className="p-6 mb-6 border-slate-200 bg-white" data-testid="backup-card">
           <div className="flex items-start gap-3 mb-4">
             <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center shrink-0">

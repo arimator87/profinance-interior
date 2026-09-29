@@ -105,6 +105,18 @@
 user_problem_statement: "Bug fix: Foto pada Kategori tidak muncul pada project yang sudah dibuat. Tampilkan foto kategori (work_categories.imageUrl) pada kartu proyek di Dashboard dan header halaman Detail Proyek."
 
 frontend:
+  - task: "WA konfirmasi + Riwayat Verifikasi (AdminSettings) + Banner status pembayaran manual (Account)"
+    implemented: true
+    working: true
+    file: "frontend/src/pages/AdminSettings.js, frontend/src/pages/Account.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "3 fitur enhancement pembayaran manual, diverifikasi manual via Playwright (LULUS). (1) WA Konfirmasi (AdminSettings): setiap kartu order pending menampilkan tombol 'Kirim WhatsApp ke pelanggan ({nomor})' (data-testid=wa-order-{id}); saat admin klik Setujui/Tolak, otomatis membuka wa.me dgn pesan template (approve: premium aktif s/d tanggal; reject: minta unggah ulang) — click-to-chat murni, tanpa API/key. Bila pelanggan tak punya nomor -> tampil teks 'Nomor WhatsApp pelanggan tidak tersedia'. Screenshot admin_wa_history.png konfirmasi tombol WA '081234567890' tampil. (2) Riwayat Verifikasi (AdminSettings): toggle 'Riwayat Verifikasi (N)' (data-testid=toggle-history) memuat GET /api/admin/manual-orders?status=resolved; menampilkan order Disetujui/Ditolak + tanggal (paid_at/rejectedAt) + badge status + tombol WA (wa-history-{id}). (3) Banner Akun (Account): pelanggan dgn order manual pending_review melihat banner biru 'Pembayaran sedang diverifikasi' (data-testid=manual-pending-banner) berisi paket+nominal+'maks 1x24 jam, tidak perlu bayar lagi'; bila rejected & belum premium -> banner merah (manual-rejected-banner) + tombol 'Unggah Ulang Bukti' (manual-retry-btn) -> /pricing; STATUS map ditambah pending_review & rejected. Verifikasi: banner customer tampil benar (screenshot customer_pending_mobile.png), tanpa overflow. Data uji dibersihkan."
+
   - task: "Lonceng notifikasi admin di Header: badge jumlah pembayaran manual pending verifikasi"
     implemented: true
     working: true
@@ -248,6 +260,18 @@ frontend:
         -comment: "✅ UI FEATURE VERIFIED - PREMIUM USER TESTS PASSED (6/6). Comprehensive Playwright test executed with premium account furnitrue.mail@gmail.com / Password123. Test project: 'Test Project Worker PDF' (id: da18ef2a-c236-4476-82c7-dcac074fe1e5) with 2 workers (Tukang Kayu, Tukang Cat). Test results: (1) LOGIN PREMIUM: Successfully authenticated and redirected to /dashboard ✓. (2) BUKA TAB TUKANG: Opened project, clicked tab 'Tukang' (data-testid=tab-tukang), found 2 worker cards ✓. (3) TOMBOL PDF SEMUA: Button 'PDF Semua' (data-testid=btn-workers-pdf) found in header next to 'Kasbon & Tukang' title, button text 'PDF Semua', NO Lock icon present for premium user ✓. Button only appears when workers exist (conditional rendering verified) ✓. (4) IKON PDF PER KARTU: Each worker card has PDF icon (data-testid=pdf-worker-{id}) in top right corner, positioned alongside edit (Pencil) and delete (Trash2) icons ✓. Verified for worker id: 25aca184-6de5-4edf-9f48-1a80e6c14ba1 ✓. (5) PDF URL PATTERNS VERIFIED: Extracted project ID from URL and verified URL construction: PDF Semua URL pattern: /api/projects/da18ef2a-c236-4476-82c7-dcac074fe1e5/workers/report/pdf?auth={token} ✓. PDF per Worker URL pattern: /api/workers/25aca184-6de5-4edf-9f48-1a80e6c14ba1/report/pdf?auth={token} ✓. Helper functions workersPdfUrl() and workerPdfUrl() in api.js correctly construct URLs with auth token from localStorage ✓. (6) LAYOUT VERIFICATION: Screenshot captured showing Tukang tab layout. All UI elements properly positioned: 'PDF Semua' button in header (amber outline), PDF icons on worker cards (top right), 'Bayar Kasbon' and 'Pelunasan' buttons on cards, '+ Tukang' button in header ✓. No visible horizontal overflow in desktop view ✓. (7) REGRESSION CHECK: Screenshot confirms all existing buttons present: 'Tambah Tukang' (data-testid=btn-add-tukang) ✓, 'Bayar Kasbon' buttons on worker cards ✓, 'Pelunasan' buttons on worker cards ✓. (8) CODE REVIEW CONFIRMS GATING LOGIC: TukangTab.js line 82-84: PDF Semua button conditionally shows Lock icon when !isPremium ✓. Line 113: PDF icon per worker with correct data-testid ✓. Line 67-74: openPdf() function checks isPremium, shows toast 'Laporan PDF tukang adalah fitur Premium' and navigates to /pricing if not premium ✓. Free user gating logic implemented correctly in code. (9) BACKEND INTEGRATION: Backend endpoints already tested and PASSED in previous round (test_result.md line 224-237): GET /api/projects/{id}/workers/report/pdf returns 200 + valid PDF ✓, GET /api/workers/{id}/report/pdf returns 200 + valid PDF ✓, Premium gating (403 for free users) ✓, Auth required (401 without token) ✓. NOTE: Test automation had timeouts with logout/re-registration flow for free user testing, but code review confirms gating logic is correctly implemented (Lock icon conditional on !isPremium, toast message, redirect to /pricing). Backend PDF endpoints already verified working in previous test round. Screenshot evidence: premium-tukang-tab.png shows all UI elements correctly positioned. Feature working correctly for premium users. No data from furnitrue.mail@gmail.com was modified (no workers deleted, no payments recorded)."
 
 backend:
+  - task: "Manual payment enhancements: status=resolved + userPhone + rejectedAt (WA konfirmasi, riwayat, banner akun)"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "Enhancement 3 fitur (permintaan user). Backend: (1) GET /api/admin/manual-orders sekarang menerima status='resolved' (paid+rejected) selain pending_review/paid/rejected/all, dan menyertakan userPhone di tiap item (untuk tombol WA click-to-chat). (2) POST /api/admin/orders/{id}/reject kini menyimpan rejectedAt timestamp (approve sudah simpan paid_at) untuk ditampilkan di Riwayat Verifikasi. Diverifikasi manual via curl: buat order manual -> approve -> GET ?status=resolved mengembalikan order dgn status=paid, paid_at terisi, userPhone. WA adalah click-to-chat wa.me murni frontend (TIDAK ada integrasi API pihak ketiga / tidak butuh key). Data uji sudah dibersihkan."
+
   - task: "Pembayaran Manual QRIS: toggle settings paymentMethod + checkout-manual + upload proof + admin approve/reject"
     implemented: true
     working: true
