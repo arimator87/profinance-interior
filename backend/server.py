@@ -710,9 +710,14 @@ async def midtrans_notification(request: Request):
     status_code = str(body.get("status_code", ""))
     gross = str(body.get("gross_amount", ""))
     signature = str(body.get("signature_key", ""))
+    client_ip = request.client.host if request.client else "unknown"
     expected = hashlib.sha512((order_id + status_code + gross + MIDTRANS_SERVER_KEY).encode()).hexdigest()
     if not order_id or not hmac.compare_digest(expected, signature):
+        # Log source IP: Midtrans migrates its notification sender IPs (new production
+        # list effective ~1 Okt 2026). These logs let us verify which IPs Midtrans uses.
+        logger.warning("Midtrans notification DITOLAK (signature invalid) dari IP %s order_id=%s", client_ip, order_id)
         raise HTTPException(status_code=401, detail="invalid signature")
+    logger.info("Midtrans notification diterima dari IP %s order_id=%s status_code=%s", client_ip, order_id, status_code)
     order = await db.orders.find_one({"order_id": order_id}, {"_id": 0})
     if not order:
         raise HTTPException(status_code=404, detail="unknown order")
