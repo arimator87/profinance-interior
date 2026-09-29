@@ -863,6 +863,13 @@ async def require_admin(user: dict = Depends(get_current_user)):
 
 
 # ---------- Admin: verifikasi pembayaran manual (QRIS pribadi) ----------
+@api.get("/admin/manual-orders/count")
+async def admin_manual_orders_count(user: dict = Depends(require_admin)):
+    """Jumlah pembayaran manual yang menunggu verifikasi (untuk badge lonceng admin)."""
+    n = await db.orders.count_documents({"payment_method": "manual", "status": "pending_review"})
+    return {"count": n}
+
+
 @api.get("/admin/manual-orders")
 async def admin_manual_orders(status: str = "pending_review", user: dict = Depends(require_admin)):
     """Daftar order pembayaran manual untuk diverifikasi admin."""

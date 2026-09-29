@@ -7,7 +7,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Crown, LogOut, LayoutDashboard, Sparkles, Ruler, PlayCircle, Receipt, BellRing, Settings, Users, Megaphone, Newspaper } from "lucide-react";
+import { Crown, LogOut, LayoutDashboard, Sparkles, Ruler, PlayCircle, Receipt, BellRing, Bell, Settings, Users, Megaphone, Newspaper } from "lucide-react";
 import { toast } from "sonner";
 
 const BANNER_THEMES = {
@@ -21,6 +21,20 @@ export function Header() {
   const navigate = useNavigate();
   const [announcement, setAnnouncement] = useState("");
   const [annTheme, setAnnTheme] = useState("info");
+  const [pendingPayments, setPendingPayments] = useState(0);
+
+  // Badge lonceng admin: jumlah pembayaran manual yang menunggu verifikasi (poll tiap 30 dtk)
+  useEffect(() => {
+    if (!isAdmin) return undefined;
+    let active = true;
+    const load = () =>
+      api.get("/admin/manual-orders/count")
+        .then((r) => { if (active) setPendingPayments(r.data?.count || 0); })
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 30000);
+    return () => { active = false; clearInterval(t); };
+  }, [isAdmin]);
 
   useEffect(() => {
     let active = true;
@@ -105,6 +119,25 @@ export function Header() {
             >
               <Crown className="w-4 h-4" /> Upgrade
             </Button>
+          )}
+
+          {isAdmin && (
+            <button
+              data-testid="admin-notif-bell"
+              onClick={() => navigate("/admin/settings")}
+              title={pendingPayments > 0 ? `${pendingPayments} pembayaran menunggu verifikasi` : "Tidak ada pembayaran menunggu verifikasi"}
+              className="relative w-9 h-9 rounded-full border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center transition-colors"
+            >
+              <Bell className={`w-4 h-4 ${pendingPayments > 0 ? "text-amber-600" : "text-slate-400"}`} />
+              {pendingPayments > 0 && (
+                <span
+                  data-testid="admin-notif-badge"
+                  className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-bold flex items-center justify-center animate-pulse"
+                >
+                  {pendingPayments > 99 ? "99+" : pendingPayments}
+                </span>
+              )}
+            </button>
           )}
 
           <DropdownMenu>
