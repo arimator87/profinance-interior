@@ -1,549 +1,767 @@
 #!/usr/bin/env python3
 """
-Test suite for Worker PDF Report endpoints (Round 14)
-Tests 2 NEW endpoints:
-1. GET /api/projects/{project_id}/workers/report/pdf - PDF for ALL workers
-2. GET /api/workers/{worker_id}/report/pdf - PDF for ONE worker
+Backend test for Manual QRIS Payment feature (Round 16)
+Tests all endpoints for the new manual payment flow.
+
+CRITICAL: This test modifies LIVE settings. It MUST restore paymentMethod='midtrans' at the end.
 """
 
 import requests
+import json
 import time
-import uuid
-import fitz  # pymupdf for PDF text extraction
+from datetime import datetime
 
-# Base URL - using internal localhost as per test instructions
-BASE_URL = "http://localhost:8001/api"
+# Base URL from frontend/.env
+BASE_URL = "https://join-interior-setup.preview.emergentagent.com/api"
 
 # Test credentials
-PREMIUM_EMAIL = "furnitrue.mail@gmail.com"
-PREMIUM_PASSWORD = "Password123"
+ADMIN_EMAIL = "furnitrue.mail@gmail.com"
+ADMIN_PASSWORD = "Password123"
 
-def log(msg):
-    print(f"[TEST] {msg}")
+# Color codes for output
+GREEN = "\033[92m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+BLUE = "\033[94m"
+RESET = "\033[0m"
 
-def login(email, password):
-    """Login and return token"""
-    log(f"Logging in as {email}...")
-    resp = requests.post(f"{BASE_URL}/auth/login", json={"email": email, "password": password}, timeout=10)
-    if resp.status_code != 200:
-        log(f"❌ Login failed: {resp.status_code} {resp.text}")
-        return None
-    data = resp.json()
-    token = data.get("token")
-    log(f"✅ Login successful, token: {token[:20]}...")
-    return token
+def log_test(test_num, description):
+    print(f"\n{BLUE}[TEST {test_num}] {description}{RESET}")
 
-def register_free_user():
-    """Register a new free user and return token"""
-    email = f"test_worker_pdf_free_{int(time.time())}@test.com"
-    log(f"Registering free user: {email}...")
-    resp = requests.post(f"{BASE_URL}/auth/register", json={
-        "email": email,
-        "name": "Test Worker PDF Free",
-        "password": "Test123456"
-    }, timeout=10)
-    if resp.status_code != 200:
-        log(f"❌ Registration failed: {resp.status_code} {resp.text}")
-        return None, None
-    data = resp.json()
-    token = data.get("token")
-    log(f"✅ Free user registered: {email}, token: {token[:20]}...")
-    return token, email
+def log_pass(message):
+    print(f"{GREEN}✓ PASS: {message}{RESET}")
 
-def demo_login():
-    """Get demo token"""
-    log("Getting demo token...")
-    resp = requests.post(f"{BASE_URL}/auth/demo", timeout=10)
-    if resp.status_code != 200:
-        log(f"❌ Demo login failed: {resp.status_code} {resp.text}")
-        return None
-    data = resp.json()
-    token = data.get("token")
-    log(f"✅ Demo token obtained: {token[:20]}...")
-    return token
+def log_fail(message):
+    print(f"{RED}✗ FAIL: {message}{RESET}")
 
-def get_projects(token):
-    """Get user's projects"""
-    resp = requests.get(f"{BASE_URL}/projects", headers={"Authorization": f"Bearer {token}"}, timeout=10)
-    if resp.status_code != 200:
-        log(f"❌ Get projects failed: {resp.status_code}")
-        return []
-    return resp.json()
+def log_info(message):
+    print(f"{YELLOW}ℹ INFO: {message}{RESET}")
 
-def get_workers(token, project_id):
-    """Get workers for a project"""
-    resp = requests.get(f"{BASE_URL}/projects/{project_id}/workers", headers={"Authorization": f"Bearer {token}"}, timeout=10)
-    if resp.status_code != 200:
-        log(f"❌ Get workers failed: {resp.status_code}")
-        return []
-    return resp.json()
+def log_warning(message):
+    print(f"{YELLOW}⚠ WARNING: {message}{RESET}")
 
-def create_project(token, name, nominal=50000000):
-    """Create a project"""
-    resp = requests.post(f"{BASE_URL}/projects", headers={"Authorization": f"Bearer {token}"}, json={
-        "name": name,
-        "owner": "Test Owner",
-        "nominal": nominal,
-        "category": "Residensial",
-        "status": "Berjalan"
-    }, timeout=10)
-    if resp.status_code != 200:
-        log(f"❌ Create project failed: {resp.status_code} {resp.text}")
-        return None
-    data = resp.json()
-    return data.get("id")
+# Global variables to store test data
+admin_token = None
+test_user_email = None
+test_user_token = None
+test_order_id = None
+original_settings = None
 
-def create_worker(token, project_id, name, borongan):
-    """Create a worker"""
-    resp = requests.post(f"{BASE_URL}/projects/{project_id}/workers", headers={"Authorization": f"Bearer {token}"}, json={
-        "name": name,
-        "borongan": borongan
-    }, timeout=10)
-    if resp.status_code != 200:
-        log(f"❌ Create worker failed: {resp.status_code} {resp.text}")
-        return None
-    data = resp.json()
-    return data.get("id")
-
-def pay_worker(token, worker_id, pay_type, amount):
-    """Pay a worker (kasbon or pelunasan)"""
-    resp = requests.post(f"{BASE_URL}/workers/{worker_id}/pay", headers={"Authorization": f"Bearer {token}"}, json={
-        "type": pay_type,
-        "amount": amount,
-        "description": f"Test {pay_type}"
-    }, timeout=10)
-    return resp.status_code == 200
-
-def delete_project(token, project_id):
-    """Delete a project"""
-    resp = requests.delete(f"{BASE_URL}/projects/{project_id}", headers={"Authorization": f"Bearer {token}"}, timeout=10)
-    return resp.status_code == 200
-
-def extract_pdf_text(pdf_bytes):
-    """Extract text from PDF bytes using pymupdf"""
+def test_1_get_public_settings_initial():
+    """Test 1: GET /api/settings/public - verify initial state"""
+    log_test(1, "GET /api/settings/public - verify paymentMethod='midtrans' (default)")
+    
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        text = ""
-        for page in doc:
-            text += page.get_text()
-        doc.close()
-        return text
-    except Exception as e:
-        log(f"⚠️ PDF text extraction failed: {e}")
-        return ""
-
-def test_workers_pdf_all(token, project_id):
-    """Test GET /api/projects/{project_id}/workers/report/pdf"""
-    log(f"\n=== TEST 1: PDF Semua Tukang (project {project_id}) ===")
-    
-    # Get workers first to verify data
-    workers = get_workers(token, project_id)
-    log(f"Project has {len(workers)} workers")
-    
-    if len(workers) == 0:
-        log("⚠️ No workers in project, skipping PDF test")
-        return False
-    
-    # Test with auth query parameter
-    url = f"{BASE_URL}/projects/{project_id}/workers/report/pdf?auth={token}"
-    log(f"GET {url}")
-    resp = requests.get(url, timeout=30)
-    
-    log(f"Status: {resp.status_code}")
-    log(f"Content-Type: {resp.headers.get('Content-Type')}")
-    log(f"Size: {len(resp.content)} bytes")
-    
-    # Verify response
-    if resp.status_code != 200:
-        log(f"❌ FAIL: Expected 200, got {resp.status_code}")
-        return False
-    
-    if resp.headers.get('Content-Type') != 'application/pdf':
-        log(f"❌ FAIL: Expected application/pdf, got {resp.headers.get('Content-Type')}")
-        return False
-    
-    if not resp.content.startswith(b'%PDF'):
-        log(f"❌ FAIL: PDF does not start with %PDF")
-        return False
-    
-    if len(resp.content) < 3000:
-        log(f"❌ FAIL: PDF size {len(resp.content)} < 3000 bytes")
-        return False
-    
-    # Extract text and verify content
-    text = extract_pdf_text(resp.content)
-    if text:
-        log(f"PDF text extracted: {len(text)} chars")
-        # Check for expected content
-        if "LAPORAN UPAH TUKANG" in text or "REKAP TUKANG" in text:
-            log("✅ PDF contains expected header text")
+        response = requests.get(f"{BASE_URL}/settings/public")
+        
+        if response.status_code != 200:
+            log_fail(f"Expected 200, got {response.status_code}")
+            return False
+        
+        data = response.json()
+        
+        # Check required fields exist
+        required_fields = ["paymentMethod", "qrisImage", "paymentNote"]
+        for field in required_fields:
+            if field not in data:
+                log_fail(f"Missing field: {field}")
+                return False
+        
+        log_pass(f"All required fields present: {required_fields}")
+        
+        # Verify default paymentMethod
+        if data["paymentMethod"] != "midtrans":
+            log_warning(f"paymentMethod is '{data['paymentMethod']}', expected 'midtrans'")
         else:
-            log("⚠️ PDF header text not found (may be in different format)")
+            log_pass("paymentMethod='midtrans' (default)")
         
-        # Check if worker names appear
-        found_workers = 0
-        for w in workers:
-            if w['name'] in text:
-                found_workers += 1
-        log(f"Found {found_workers}/{len(workers)} worker names in PDF")
-    
-    log("✅ PASS: PDF Semua Tukang generated successfully")
-    return True
-
-def test_worker_pdf_single(token, worker_id, worker_name, expected_total_dibayar):
-    """Test GET /api/workers/{worker_id}/report/pdf"""
-    log(f"\n=== TEST 2: PDF Per Tukang (worker {worker_id}: {worker_name}) ===")
-    
-    # Test with auth query parameter
-    url = f"{BASE_URL}/workers/{worker_id}/report/pdf?auth={token}"
-    log(f"GET {url}")
-    resp = requests.get(url, timeout=30)
-    
-    log(f"Status: {resp.status_code}")
-    log(f"Content-Type: {resp.headers.get('Content-Type')}")
-    log(f"Size: {len(resp.content)} bytes")
-    
-    # Verify response
-    if resp.status_code != 200:
-        log(f"❌ FAIL: Expected 200, got {resp.status_code}")
-        return False
-    
-    if resp.headers.get('Content-Type') != 'application/pdf':
-        log(f"❌ FAIL: Expected application/pdf, got {resp.headers.get('Content-Type')}")
-        return False
-    
-    if not resp.content.startswith(b'%PDF'):
-        log(f"❌ FAIL: PDF does not start with %PDF")
-        return False
-    
-    if len(resp.content) < 3000:
-        log(f"❌ FAIL: PDF size {len(resp.content)} < 3000 bytes")
-        return False
-    
-    # Extract text and verify content
-    text = extract_pdf_text(resp.content)
-    if text:
-        log(f"PDF text extracted: {len(text)} chars")
+        log_info(f"qrisImage: {data['qrisImage'][:50] if data['qrisImage'] else '(empty)'}")
+        log_info(f"paymentNote: {data['paymentNote'][:50] if data['paymentNote'] else '(empty)'}")
         
-        # Check for expected content
-        checks = {
-            "LAPORAN UPAH TUKANG": "LAPORAN UPAH TUKANG" in text,
-            "Worker name": worker_name in text,
-            "RIWAYAT PEMBAYARAN": "RIWAYAT PEMBAYARAN" in text or "RIWAYAT" in text,
-            "TOTAL DIBAYAR": "TOTAL DIBAYAR" in text or "Total Dibayar" in text,
+        # Store original settings for restoration
+        global original_settings
+        original_settings = {
+            "paymentMethod": data["paymentMethod"],
+            "qrisImage": data.get("qrisImage", ""),
+            "paymentNote": data.get("paymentNote", "")
         }
         
-        for check_name, result in checks.items():
-            if result:
-                log(f"✅ Found: {check_name}")
-            else:
-                log(f"⚠️ Not found: {check_name}")
+        return True
         
-        # Math check: verify total dibayar appears in PDF
-        if expected_total_dibayar > 0:
-            # Format as Indonesian rupiah (with dots as thousand separators)
-            formatted = f"{expected_total_dibayar:,}".replace(",", ".")
-            if formatted in text or f"Rp {formatted}" in text or f"Rp{formatted}" in text:
-                log(f"✅ MATH CHECK PASS: Total Dibayar Rp {formatted} found in PDF")
-            else:
-                log(f"⚠️ MATH CHECK: Total Dibayar Rp {formatted} not found in exact format (may be formatted differently)")
-    
-    log("✅ PASS: PDF Per Tukang generated successfully")
-    return True
-
-def test_auth_required():
-    """Test that endpoints require authentication"""
-    log("\n=== TEST 3: Auth Required (401 without token) ===")
-    
-    # Use a dummy project_id and worker_id
-    dummy_project = "test-project-id"
-    dummy_worker = "test-worker-id"
-    
-    # Test workers PDF without auth
-    url1 = f"{BASE_URL}/projects/{dummy_project}/workers/report/pdf"
-    resp1 = requests.get(url1, timeout=10)
-    log(f"GET {url1} (no auth): {resp1.status_code}")
-    
-    # Test worker PDF without auth
-    url2 = f"{BASE_URL}/workers/{dummy_worker}/report/pdf"
-    resp2 = requests.get(url2, timeout=10)
-    log(f"GET {url2} (no auth): {resp2.status_code}")
-    
-    if resp1.status_code == 401 and resp2.status_code == 401:
-        log("✅ PASS: Both endpoints return 401 without auth")
-        return True
-    else:
-        log(f"❌ FAIL: Expected 401 for both, got {resp1.status_code} and {resp2.status_code}")
+    except Exception as e:
+        log_fail(f"Exception: {e}")
         return False
 
-def test_free_user_gating():
-    """Test that free users get 403"""
-    log("\n=== TEST 4: Free User Gating (403) ===")
+def test_2_checkout_manual_blocked_when_midtrans():
+    """Test 2: POST /api/subscription/checkout-manual should fail when paymentMethod='midtrans'"""
+    log_test(2, "POST /api/subscription/checkout-manual - should return 400 when method is midtrans")
     
-    # Register free user
-    free_token, free_email = register_free_user()
-    if not free_token:
-        log("❌ FAIL: Could not register free user")
-        return False
-    
-    # Create project and worker for free user
-    project_id = create_project(free_token, "Free User Test Project")
-    if not project_id:
-        log("❌ FAIL: Could not create project for free user")
-        return False
-    
-    worker_id = create_worker(free_token, project_id, "Test Worker", 5000000)
-    if not worker_id:
-        log("❌ FAIL: Could not create worker for free user")
-        return False
-    
-    # Try to access both PDF endpoints with free token
-    url1 = f"{BASE_URL}/projects/{project_id}/workers/report/pdf?auth={free_token}"
-    resp1 = requests.get(url1, timeout=10)
-    log(f"GET workers PDF (free user): {resp1.status_code}")
-    
-    url2 = f"{BASE_URL}/workers/{worker_id}/report/pdf?auth={free_token}"
-    resp2 = requests.get(url2, timeout=10)
-    log(f"GET worker PDF (free user): {resp2.status_code}")
-    
-    # Cleanup
-    delete_project(free_token, project_id)
-    
-    if resp1.status_code == 403 and resp2.status_code == 403:
-        log("✅ PASS: Free user correctly blocked with 403")
+    try:
+        # First, register a temporary user for this test
+        timestamp = int(time.time())
+        temp_email = f"test_manual_blocked_{timestamp}@test.com"
+        
+        # Register
+        reg_response = requests.post(f"{BASE_URL}/auth/register", json={
+            "email": temp_email,
+            "name": "Test User Blocked",
+            "password": "Test12345"
+        })
+        
+        if reg_response.status_code != 200:
+            log_fail(f"Failed to register temp user: {reg_response.status_code}")
+            return False
+        
+        temp_token = reg_response.json().get("token")
+        
+        # Try checkout-manual (should fail because paymentMethod is midtrans)
+        response = requests.post(
+            f"{BASE_URL}/subscription/checkout-manual",
+            json={"plan": "monthly"},
+            headers={"Authorization": f"Bearer {temp_token}"}
+        )
+        
+        if response.status_code != 400:
+            log_fail(f"Expected 400, got {response.status_code}")
+            return False
+        
+        error_msg = response.json().get("detail", "")
+        if "manual tidak aktif" not in error_msg.lower():
+            log_fail(f"Expected error about manual not active, got: {error_msg}")
+            return False
+        
+        log_pass(f"Correctly blocked with 400: {error_msg}")
         return True
-    else:
-        log(f"❌ FAIL: Expected 403 for both, got {resp1.status_code} and {resp2.status_code}")
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
         return False
 
-def test_ownership():
-    """Test that users can only access their own workers"""
-    log("\n=== TEST 5: Ownership Check (404 for other user's worker) ===")
+def test_3_admin_login_and_change_to_manual():
+    """Test 3: Admin login and PUT /api/admin/settings to change paymentMethod to 'manual'"""
+    log_test(3, "Admin login and change paymentMethod to 'manual'")
     
-    # Register free user
-    free_token, free_email = register_free_user()
-    if not free_token:
-        log("❌ FAIL: Could not register free user")
-        return False
+    global admin_token
     
-    # Get premium user's project and worker
-    premium_token = login(PREMIUM_EMAIL, PREMIUM_PASSWORD)
-    if not premium_token:
-        log("❌ FAIL: Could not login premium user")
-        return False
-    
-    projects = get_projects(premium_token)
-    if not projects:
-        log("❌ FAIL: Premium user has no projects")
-        return False
-    
-    project_id = projects[0]['id']
-    workers = get_workers(premium_token, project_id)
-    if not workers:
-        log("❌ FAIL: Premium project has no workers")
-        return False
-    
-    premium_worker_id = workers[0]['id']
-    
-    # Try to access premium worker with free token
-    url = f"{BASE_URL}/workers/{premium_worker_id}/report/pdf?auth={free_token}"
-    resp = requests.get(url, timeout=10)
-    log(f"GET premium worker PDF with free token: {resp.status_code}")
-    
-    if resp.status_code == 404:
-        log("✅ PASS: Free user gets 404 for premium user's worker")
+    try:
+        # Admin login
+        response = requests.post(f"{BASE_URL}/auth/login", json={
+            "email": ADMIN_EMAIL,
+            "password": ADMIN_PASSWORD
+        })
+        
+        if response.status_code != 200:
+            log_fail(f"Admin login failed: {response.status_code}")
+            return False
+        
+        admin_token = response.json().get("token")
+        log_pass(f"Admin logged in successfully")
+        
+        # Change settings to manual
+        response = requests.put(
+            f"{BASE_URL}/admin/settings",
+            json={
+                "paymentMethod": "manual",
+                "paymentNote": "Transfer ke QRIS di atas. Setelah transfer, unggah bukti pembayaran."
+            },
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        
+        if response.status_code != 200:
+            log_fail(f"Failed to update settings: {response.status_code}")
+            return False
+        
+        data = response.json()
+        if data.get("paymentMethod") != "manual":
+            log_fail(f"paymentMethod not updated, got: {data.get('paymentMethod')}")
+            return False
+        
+        log_pass("Settings updated to paymentMethod='manual'")
+        
+        # Verify public endpoint reflects the change
+        pub_response = requests.get(f"{BASE_URL}/settings/public")
+        pub_data = pub_response.json()
+        
+        if pub_data.get("paymentMethod") != "manual":
+            log_fail(f"Public settings not updated, got: {pub_data.get('paymentMethod')}")
+            return False
+        
+        log_pass("Public settings confirmed: paymentMethod='manual'")
+        log_info(f"paymentNote: {pub_data.get('paymentNote', '')[:80]}")
+        
         return True
-    else:
-        log(f"❌ FAIL: Expected 404, got {resp.status_code}")
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
         return False
 
-def test_worker_without_payments():
-    """Test PDF generation for worker without any payments"""
-    log("\n=== TEST 6: Worker Without Payments (fallback text) ===")
+def test_4_user_checkout_manual_creates_pending_order():
+    """Test 4: Register free user and POST /api/subscription/checkout-manual creates pending_review order"""
+    log_test(4, "User checkout-manual creates order with status='pending_review'")
     
-    # Login premium
-    token = login(PREMIUM_EMAIL, PREMIUM_PASSWORD)
-    if not token:
-        log("❌ FAIL: Could not login")
+    global test_user_email, test_user_token, test_order_id
+    
+    try:
+        # Register new free user
+        timestamp = int(time.time())
+        test_user_email = f"test_manual_user_{timestamp}@test.com"
+        
+        response = requests.post(f"{BASE_URL}/auth/register", json={
+            "email": test_user_email,
+            "name": "Test Manual User",
+            "password": "Test12345"
+        })
+        
+        if response.status_code != 200:
+            log_fail(f"Failed to register user: {response.status_code}")
+            return False
+        
+        test_user_token = response.json().get("token")
+        log_pass(f"Registered test user: {test_user_email}")
+        
+        # Get current settings to check promo price
+        settings_response = requests.get(f"{BASE_URL}/settings/public")
+        settings = settings_response.json()
+        
+        expected_amount = settings.get("monthlyPromo", 149000) if settings.get("promoActive") else settings.get("monthlyPrice", 149000)
+        log_info(f"Expected gross_amount: {expected_amount} (promoActive={settings.get('promoActive')})")
+        
+        # Checkout manual
+        response = requests.post(
+            f"{BASE_URL}/subscription/checkout-manual",
+            json={"plan": "monthly"},
+            headers={"Authorization": f"Bearer {test_user_token}"}
+        )
+        
+        if response.status_code != 200:
+            log_fail(f"checkout-manual failed: {response.status_code} - {response.text}")
+            return False
+        
+        data = response.json()
+        test_order_id = data.get("order_id")
+        
+        # Verify response
+        if not test_order_id:
+            log_fail("No order_id in response")
+            return False
+        
+        if data.get("status") != "pending_review":
+            log_fail(f"Expected status='pending_review', got: {data.get('status')}")
+            return False
+        
+        if data.get("gross_amount") != expected_amount:
+            log_warning(f"gross_amount={data.get('gross_amount')}, expected={expected_amount}")
+        else:
+            log_pass(f"gross_amount correct: {data.get('gross_amount')}")
+        
+        log_pass(f"Order created: {test_order_id}, status='pending_review'")
+        log_info(f"Plan: {data.get('plan')}, Amount: {data.get('gross_amount')}")
+        
+        return True
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
         return False
-    
-    # Create test project
-    project_id = create_project(token, "Test Worker No Payment")
-    if not project_id:
-        log("❌ FAIL: Could not create project")
-        return False
-    
-    # Create worker without any payments
-    worker_id = create_worker(token, project_id, "Tukang Tanpa Bayar", 10000000)
-    if not worker_id:
-        log("❌ FAIL: Could not create worker")
-        delete_project(token, project_id)
-        return False
-    
-    # Get PDF
-    url = f"{BASE_URL}/workers/{worker_id}/report/pdf?auth={token}"
-    resp = requests.get(url, timeout=30)
-    
-    log(f"Status: {resp.status_code}")
-    log(f"Size: {len(resp.content)} bytes")
-    
-    # Cleanup
-    delete_project(token, project_id)
-    
-    if resp.status_code != 200:
-        log(f"❌ FAIL: Expected 200, got {resp.status_code}")
-        return False
-    
-    if not resp.content.startswith(b'%PDF'):
-        log(f"❌ FAIL: Not a valid PDF")
-        return False
-    
-    # Check for fallback text
-    text = extract_pdf_text(resp.content)
-    if text and ("Belum ada pembayaran" in text or "belum ada pembayaran" in text or "Rp 0" in text):
-        log("✅ PDF contains fallback text for no payments")
-    
-    log("✅ PASS: PDF generated for worker without payments")
-    return True
 
-def test_demo_user_access():
-    """Test that demo user (premium read-only) can access PDFs"""
-    log("\n=== TEST 7: Demo User Access (200 for GET) ===")
+def test_5_proof_upload_validation():
+    """Test 5: POST /api/subscription/order/{order_id}/proof - validation"""
+    log_test(5, "Proof upload validation - empty proofUrl should return 400")
     
-    # Get demo token
-    demo_token = demo_login()
-    if not demo_token:
-        log("❌ FAIL: Could not get demo token")
+    try:
+        # Test with empty proofUrl
+        response = requests.post(
+            f"{BASE_URL}/subscription/order/{test_order_id}/proof",
+            json={"proofUrl": ""},
+            headers={"Authorization": f"Bearer {test_user_token}"}
+        )
+        
+        if response.status_code != 400:
+            log_fail(f"Expected 400 for empty proofUrl, got {response.status_code}")
+            return False
+        
+        error_msg = response.json().get("detail", "")
+        if "wajib" not in error_msg.lower():
+            log_fail(f"Expected error about required proof, got: {error_msg}")
+            return False
+        
+        log_pass(f"Empty proofUrl correctly rejected with 400: {error_msg}")
+        
+        # Now upload valid proof
+        proof_url = f"profinance-interior/uploads/test/proof_{int(time.time())}.jpg"
+        response = requests.post(
+            f"{BASE_URL}/subscription/order/{test_order_id}/proof",
+            json={"proofUrl": proof_url},
+            headers={"Authorization": f"Bearer {test_user_token}"}
+        )
+        
+        if response.status_code != 200:
+            log_fail(f"Failed to upload proof: {response.status_code} - {response.text}")
+            return False
+        
+        data = response.json()
+        if data.get("status") != "pending_review":
+            log_fail(f"Expected status='pending_review', got: {data.get('status')}")
+            return False
+        
+        log_pass(f"Proof uploaded successfully, status='pending_review'")
+        log_info(f"proofUrl: {proof_url}")
+        
+        return True
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
         return False
+
+def test_6_get_order_status():
+    """Test 6: GET /api/subscription/order/{order_id} - verify status"""
+    log_test(6, "GET /api/subscription/order/{order_id} - verify pending_review")
     
-    # Get demo projects
-    projects = get_projects(demo_token)
-    if not projects:
-        log("⚠️ SKIP: Demo user has no projects")
+    try:
+        response = requests.get(
+            f"{BASE_URL}/subscription/order/{test_order_id}",
+            headers={"Authorization": f"Bearer {test_user_token}"}
+        )
+        
+        if response.status_code != 200:
+            log_fail(f"Failed to get order: {response.status_code}")
+            return False
+        
+        data = response.json()
+        
+        if data.get("status") != "pending_review":
+            log_fail(f"Expected status='pending_review', got: {data.get('status')}")
+            return False
+        
+        log_pass(f"Order status confirmed: pending_review")
+        log_info(f"Order: {data.get('order_id')}, Plan: {data.get('plan')}")
+        
         return True
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
+        return False
+
+def test_7_admin_manual_orders_list():
+    """Test 7: GET /api/admin/manual-orders - verify order appears with user info"""
+    log_test(7, "GET /api/admin/manual-orders - verify order in list with userName/userEmail")
     
-    project_id = projects[0]['id']
-    workers = get_workers(demo_token, project_id)
-    if not workers:
-        log("⚠️ SKIP: Demo project has no workers")
+    try:
+        response = requests.get(
+            f"{BASE_URL}/admin/manual-orders?status=pending_review",
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        
+        if response.status_code != 200:
+            log_fail(f"Failed to get manual orders: {response.status_code}")
+            return False
+        
+        orders = response.json()
+        
+        # Find our test order
+        test_order = None
+        for order in orders:
+            if order.get("order_id") == test_order_id:
+                test_order = order
+                break
+        
+        if not test_order:
+            log_fail(f"Test order {test_order_id} not found in manual-orders list")
+            return False
+        
+        # Verify user info is joined
+        if not test_order.get("userName"):
+            log_fail("userName not present in order")
+            return False
+        
+        if test_order.get("userEmail") != test_user_email:
+            log_fail(f"userEmail mismatch: {test_order.get('userEmail')} != {test_user_email}")
+            return False
+        
+        log_pass(f"Order found in list with correct user info")
+        log_info(f"userName: {test_order.get('userName')}, userEmail: {test_order.get('userEmail')}")
+        
         return True
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
+        return False
+
+def test_8_gating_non_admin():
+    """Test 8: Non-admin user should get 403 on admin endpoints"""
+    log_test(8, "Gating - non-admin user gets 403 on admin endpoints")
     
-    # Try to access both PDF endpoints
-    url1 = f"{BASE_URL}/projects/{project_id}/workers/report/pdf?auth={demo_token}"
-    resp1 = requests.get(url1, timeout=30)
-    log(f"GET workers PDF (demo): {resp1.status_code}")
-    
-    worker_id = workers[0]['id']
-    url2 = f"{BASE_URL}/workers/{worker_id}/report/pdf?auth={demo_token}"
-    resp2 = requests.get(url2, timeout=30)
-    log(f"GET worker PDF (demo): {resp2.status_code}")
-    
-    if resp1.status_code == 200 and resp2.status_code == 200:
-        log("✅ PASS: Demo user can access PDF endpoints (read-only premium)")
+    try:
+        # Test GET /api/admin/manual-orders
+        response = requests.get(
+            f"{BASE_URL}/admin/manual-orders",
+            headers={"Authorization": f"Bearer {test_user_token}"}
+        )
+        
+        if response.status_code != 403:
+            log_fail(f"Expected 403 for GET manual-orders, got {response.status_code}")
+            return False
+        
+        log_pass("GET /api/admin/manual-orders correctly returns 403 for non-admin")
+        
+        # Test POST approve
+        response = requests.post(
+            f"{BASE_URL}/admin/orders/{test_order_id}/approve",
+            headers={"Authorization": f"Bearer {test_user_token}"}
+        )
+        
+        if response.status_code != 403:
+            log_fail(f"Expected 403 for POST approve, got {response.status_code}")
+            return False
+        
+        log_pass("POST /api/admin/orders/{id}/approve correctly returns 403 for non-admin")
+        
+        # Test POST reject
+        response = requests.post(
+            f"{BASE_URL}/admin/orders/{test_order_id}/reject",
+            headers={"Authorization": f"Bearer {test_user_token}"}
+        )
+        
+        if response.status_code != 403:
+            log_fail(f"Expected 403 for POST reject, got {response.status_code}")
+            return False
+        
+        log_pass("POST /api/admin/orders/{id}/reject correctly returns 403 for non-admin")
+        
         return True
-    else:
-        log(f"❌ FAIL: Expected 200 for both, got {resp1.status_code} and {resp2.status_code}")
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
+        return False
+
+def test_9_admin_reject_order():
+    """Test 9: Admin POST /api/admin/orders/{id}/reject"""
+    log_test(9, "Admin rejects order - status becomes 'rejected'")
+    
+    try:
+        response = requests.post(
+            f"{BASE_URL}/admin/orders/{test_order_id}/reject",
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        
+        if response.status_code != 200:
+            log_fail(f"Failed to reject order: {response.status_code} - {response.text}")
+            return False
+        
+        data = response.json()
+        if not data.get("ok"):
+            log_fail(f"Response not ok: {data}")
+            return False
+        
+        log_pass("Order rejected successfully")
+        
+        # Verify status changed to rejected
+        order_response = requests.get(
+            f"{BASE_URL}/subscription/order/{test_order_id}",
+            headers={"Authorization": f"Bearer {test_user_token}"}
+        )
+        
+        order_data = order_response.json()
+        if order_data.get("status") != "rejected":
+            log_fail(f"Expected status='rejected', got: {order_data.get('status')}")
+            return False
+        
+        log_pass("Order status confirmed: rejected")
+        
+        return True
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
+        return False
+
+def test_10_reupload_proof_after_rejection():
+    """Test 10: User can re-upload proof after rejection, status returns to pending_review"""
+    log_test(10, "User re-uploads proof after rejection - status returns to pending_review")
+    
+    try:
+        proof_url = f"profinance-interior/uploads/test/proof_reupload_{int(time.time())}.jpg"
+        
+        response = requests.post(
+            f"{BASE_URL}/subscription/order/{test_order_id}/proof",
+            json={"proofUrl": proof_url},
+            headers={"Authorization": f"Bearer {test_user_token}"}
+        )
+        
+        if response.status_code != 200:
+            log_fail(f"Failed to re-upload proof: {response.status_code} - {response.text}")
+            return False
+        
+        data = response.json()
+        if data.get("status") != "pending_review":
+            log_fail(f"Expected status='pending_review', got: {data.get('status')}")
+            return False
+        
+        log_pass("Proof re-uploaded successfully, status back to pending_review")
+        
+        return True
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
+        return False
+
+def test_11_admin_approve_order():
+    """Test 11: Admin approves order - user becomes premium"""
+    log_test(11, "Admin approves order - user gets premium access")
+    
+    try:
+        # Approve order
+        response = requests.post(
+            f"{BASE_URL}/admin/orders/{test_order_id}/approve",
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        
+        if response.status_code != 200:
+            log_fail(f"Failed to approve order: {response.status_code} - {response.text}")
+            return False
+        
+        data = response.json()
+        if not data.get("ok"):
+            log_fail(f"Response not ok: {data}")
+            return False
+        
+        premium_until = data.get("premium_until")
+        if not premium_until:
+            log_fail("No premium_until in response")
+            return False
+        
+        log_pass(f"Order approved successfully, premium_until: {premium_until}")
+        
+        # Verify user is now premium
+        me_response = requests.get(
+            f"{BASE_URL}/auth/me",
+            headers={"Authorization": f"Bearer {test_user_token}"}
+        )
+        
+        if me_response.status_code != 200:
+            log_fail(f"Failed to get user info: {me_response.status_code}")
+            return False
+        
+        user_data = me_response.json()
+        
+        if user_data.get("subscriptionTier") != "premium":
+            log_fail(f"Expected subscriptionTier='premium', got: {user_data.get('subscriptionTier')}")
+            return False
+        
+        log_pass(f"User confirmed as premium, subscriptionTier='premium'")
+        
+        # Check subscriptionExpiry is ~30 days from now
+        expiry = user_data.get("subscriptionExpiry")
+        if expiry:
+            log_info(f"subscriptionExpiry: {expiry}")
+        
+        # Test idempotency - approve again
+        response2 = requests.post(
+            f"{BASE_URL}/admin/orders/{test_order_id}/approve",
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        
+        if response2.status_code != 200:
+            log_fail(f"Second approve failed: {response2.status_code}")
+            return False
+        
+        data2 = response2.json()
+        if not data2.get("already"):
+            log_fail("Second approve should return already:true")
+            return False
+        
+        log_pass("Idempotent approve confirmed: already=true on second call")
+        
+        return True
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
+        return False
+
+def test_12_cannot_reject_paid_order():
+    """Test 12: Admin cannot reject order that is already paid"""
+    log_test(12, "Admin cannot reject order with status='paid'")
+    
+    try:
+        response = requests.post(
+            f"{BASE_URL}/admin/orders/{test_order_id}/reject",
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        
+        if response.status_code != 400:
+            log_fail(f"Expected 400 for rejecting paid order, got {response.status_code}")
+            return False
+        
+        error_msg = response.json().get("detail", "")
+        if "lunas" not in error_msg.lower() or "tidak dapat ditolak" not in error_msg.lower():
+            log_fail(f"Expected error about paid order, got: {error_msg}")
+            return False
+        
+        log_pass(f"Correctly blocked with 400: {error_msg}")
+        
+        return True
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
+        return False
+
+def test_13_demo_user_blocked():
+    """Test 13: Demo user gets 403 on POST /api/subscription/checkout-manual"""
+    log_test(13, "Demo user (read-only) gets 403 on checkout-manual")
+    
+    try:
+        # Get demo token
+        response = requests.post(f"{BASE_URL}/auth/demo")
+        
+        if response.status_code != 200:
+            log_fail(f"Failed to get demo token: {response.status_code}")
+            return False
+        
+        demo_token = response.json().get("token")
+        log_pass("Demo token obtained")
+        
+        # Try checkout-manual
+        response = requests.post(
+            f"{BASE_URL}/subscription/checkout-manual",
+            json={"plan": "monthly"},
+            headers={"Authorization": f"Bearer {demo_token}"}
+        )
+        
+        if response.status_code != 403:
+            log_fail(f"Expected 403 for demo user, got {response.status_code}")
+            return False
+        
+        error_msg = response.json().get("detail", "")
+        if "demo" not in error_msg.lower():
+            log_fail(f"Expected error about demo mode, got: {error_msg}")
+            return False
+        
+        log_pass(f"Demo user correctly blocked with 403: {error_msg}")
+        
+        return True
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
+        return False
+
+def test_14_restore_settings():
+    """Test 14: CRITICAL - Restore paymentMethod to 'midtrans'"""
+    log_test(14, "RESTORE settings - change paymentMethod back to 'midtrans'")
+    
+    try:
+        # Restore original settings
+        response = requests.put(
+            f"{BASE_URL}/admin/settings",
+            json={"paymentMethod": "midtrans"},
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        
+        if response.status_code != 200:
+            log_fail(f"CRITICAL: Failed to restore settings: {response.status_code}")
+            log_fail("MANUAL ACTION REQUIRED: Set paymentMethod='midtrans' in admin settings!")
+            return False
+        
+        data = response.json()
+        if data.get("paymentMethod") != "midtrans":
+            log_fail(f"CRITICAL: paymentMethod not restored, got: {data.get('paymentMethod')}")
+            return False
+        
+        log_pass("Settings restored: paymentMethod='midtrans'")
+        
+        # Verify public endpoint
+        pub_response = requests.get(f"{BASE_URL}/settings/public")
+        pub_data = pub_response.json()
+        
+        if pub_data.get("paymentMethod") != "midtrans":
+            log_fail(f"CRITICAL: Public settings not restored, got: {pub_data.get('paymentMethod')}")
+            return False
+        
+        log_pass("Public settings confirmed: paymentMethod='midtrans'")
+        log_info("✓ LIVE settings successfully restored to original state")
+        
+        return True
+        
+    except Exception as e:
+        log_fail(f"CRITICAL Exception: {e}")
+        log_fail("MANUAL ACTION REQUIRED: Set paymentMethod='midtrans' in admin settings!")
+        return False
+
+def test_15_cleanup():
+    """Test 15: Cleanup test data"""
+    log_test(15, "Cleanup - delete test order (optional)")
+    
+    try:
+        # Note: There's no DELETE endpoint for orders in the API
+        # We'll just log that cleanup would be done manually if needed
+        log_info(f"Test order {test_order_id} can be deleted manually from MongoDB if needed")
+        log_info(f"Test user {test_user_email} can remain in the system")
+        log_pass("Cleanup noted (manual deletion available if needed)")
+        
+        return True
+        
+    except Exception as e:
+        log_fail(f"Exception: {e}")
         return False
 
 def main():
-    """Run all tests"""
-    log("=" * 60)
-    log("WORKER PDF REPORT ENDPOINTS TEST SUITE (Round 14)")
-    log("=" * 60)
+    print(f"\n{BLUE}{'='*80}")
+    print("BACKEND TEST: Manual QRIS Payment Feature (Round 16)")
+    print(f"{'='*80}{RESET}\n")
     
-    results = {}
+    print(f"{YELLOW}⚠ WARNING: This test modifies LIVE production settings!{RESET}")
+    print(f"{YELLOW}⚠ Settings will be restored at the end of the test.{RESET}\n")
     
-    # Login premium user
-    premium_token = login(PREMIUM_EMAIL, PREMIUM_PASSWORD)
-    if not premium_token:
-        log("❌ CRITICAL: Cannot login premium user, aborting tests")
-        return
+    print(f"Base URL: {BASE_URL}")
+    print(f"Admin: {ADMIN_EMAIL}\n")
     
-    # Get premium user's projects and workers
-    projects = get_projects(premium_token)
-    if not projects:
-        log("❌ CRITICAL: Premium user has no projects")
-        return
+    tests = [
+        test_1_get_public_settings_initial,
+        test_2_checkout_manual_blocked_when_midtrans,
+        test_3_admin_login_and_change_to_manual,
+        test_4_user_checkout_manual_creates_pending_order,
+        test_5_proof_upload_validation,
+        test_6_get_order_status,
+        test_7_admin_manual_orders_list,
+        test_8_gating_non_admin,
+        test_9_admin_reject_order,
+        test_10_reupload_proof_after_rejection,
+        test_11_admin_approve_order,
+        test_12_cannot_reject_paid_order,
+        test_13_demo_user_blocked,
+        test_14_restore_settings,
+        test_15_cleanup,
+    ]
     
-    log(f"\nPremium user has {len(projects)} projects")
+    results = []
     
-    # Find a project with workers
-    test_project_id = None
-    test_workers = []
-    for proj in projects:
-        workers = get_workers(premium_token, proj['id'])
-        if workers:
-            test_project_id = proj['id']
-            test_workers = workers
-            log(f"Using project '{proj['name']}' (id: {test_project_id}) with {len(workers)} workers")
-            break
-    
-    if not test_project_id or not test_workers:
-        log("⚠️ WARNING: No project with workers found, creating test data...")
-        # Create test project with workers
-        test_project_id = create_project(premium_token, "Test Worker PDF Project", 50000000)
-        if test_project_id:
-            # Create 2 workers with payments
-            w1_id = create_worker(premium_token, test_project_id, "Tukang Kayu", 15000000)
-            if w1_id:
-                pay_worker(premium_token, w1_id, "kasbon", 5000000)
-                pay_worker(premium_token, w1_id, "pelunasan", 8000000)
-            
-            w2_id = create_worker(premium_token, test_project_id, "Tukang Cat", 10000000)
-            if w2_id:
-                pay_worker(premium_token, w2_id, "kasbon", 3000000)
-            
-            test_workers = get_workers(premium_token, test_project_id)
-            log(f"Created test project with {len(test_workers)} workers")
-    
-    # Run tests
-    if test_project_id and test_workers:
-        # Test 1: PDF Semua Tukang
-        results['test_1_workers_pdf_all'] = test_workers_pdf_all(premium_token, test_project_id)
-        
-        # Test 2: PDF Per Tukang
-        test_worker = test_workers[0]
-        results['test_2_worker_pdf_single'] = test_worker_pdf_single(
-            premium_token, 
-            test_worker['id'], 
-            test_worker['name'],
-            test_worker.get('totalDibayar', 0)
-        )
-    
-    # Test 3: Auth required
-    results['test_3_auth_required'] = test_auth_required()
-    
-    # Test 4: Free user gating
-    results['test_4_free_user_gating'] = test_free_user_gating()
-    
-    # Test 5: Ownership
-    results['test_5_ownership'] = test_ownership()
-    
-    # Test 6: Worker without payments
-    results['test_6_worker_no_payments'] = test_worker_without_payments()
-    
-    # Test 7: Demo user access
-    results['test_7_demo_user_access'] = test_demo_user_access()
+    for test_func in tests:
+        try:
+            result = test_func()
+            results.append((test_func.__name__, result))
+        except Exception as e:
+            log_fail(f"Unhandled exception in {test_func.__name__}: {e}")
+            results.append((test_func.__name__, False))
     
     # Summary
-    log("\n" + "=" * 60)
-    log("TEST SUMMARY")
-    log("=" * 60)
+    print(f"\n{BLUE}{'='*80}")
+    print("TEST SUMMARY")
+    print(f"{'='*80}{RESET}\n")
     
-    passed = sum(1 for v in results.values() if v)
+    passed = sum(1 for _, result in results if result)
     total = len(results)
     
-    for test_name, result in results.items():
-        status = "✅ PASS" if result else "❌ FAIL"
-        log(f"{status}: {test_name}")
+    for test_name, result in results:
+        status = f"{GREEN}PASS{RESET}" if result else f"{RED}FAIL{RESET}"
+        print(f"{status} - {test_name}")
     
-    log(f"\nTotal: {passed}/{total} tests passed")
-    log("=" * 60)
+    print(f"\n{BLUE}Total: {passed}/{total} tests passed{RESET}")
     
     if passed == total:
-        log("🎉 ALL TESTS PASSED!")
+        print(f"\n{GREEN}✓ ALL TESTS PASSED!{RESET}")
+        print(f"{GREEN}✓ Settings successfully restored to paymentMethod='midtrans'{RESET}\n")
     else:
-        log(f"⚠️ {total - passed} test(s) failed")
+        print(f"\n{RED}✗ SOME TESTS FAILED{RESET}")
+        if not results[13][1]:  # test_14_restore_settings
+            print(f"{RED}✗ CRITICAL: Settings restoration failed!{RESET}")
+            print(f"{RED}✗ MANUAL ACTION REQUIRED: Restore paymentMethod='midtrans' in admin settings!{RESET}\n")
 
 if __name__ == "__main__":
     main()

@@ -1,13 +1,14 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "@/lib/api";
+import { api, fileUrl } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { Header } from "@/components/Header";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { rupiah } from "@/lib/format";
 import { motion } from "framer-motion";
-import { Check, Crown, Sparkles, ArrowLeft, Loader2, ShieldCheck, Timer } from "lucide-react";
+import { Check, Crown, Sparkles, ArrowLeft, Loader2, ShieldCheck, Timer, QrCode, Upload, Hourglass, BadgeCheck } from "lucide-react";
 import { toast } from "sonner";
 import Seo from "@/components/Seo";
 
@@ -47,6 +48,11 @@ export default function Pricing() {
   const [pricing, setPricing] = useState(null);
   const [serverOffset, setServerOffset] = useState(0);
   const [nowTick, setNowTick] = useState(Date.now());
+  // ---- Pembayaran manual (QRIS pribadi) ----
+  const [manualOrder, setManualOrder] = useState(null);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [proofState, setProofState] = useState("idle"); // idle | uploading | done
+  const proofRef = useRef(null);
 
   useEffect(() => {
     api.get("/settings/public").then((r) => {
@@ -92,6 +98,63 @@ export default function Pricing() {
     setTimeout(() => navigate("/dashboard"), 900);
   };
 
+  // ---- Pembayaran manual (QRIS pribadi) ----
+  const manualPay = async (plan) => {
+    setBusy(true);
+    try {
+      const { data } = await api.post("/subscription/checkout-manual", { plan });
+      setManualOrder(data);
+      setProofState("idle");
+      setManualOpen(true);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Gagal membuat order pembayaran");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitProof = async (file) => {
+    if (!file || !manualOrder) return;
+    if (!(file.type.startsWith("image/") || file.type === "application/pdf")) {
+      toast.error("Bukti harus berupa gambar (JPG/PNG) atau PDF");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error("Ukuran bukti maksimal 2 MB");
+      return;
+    }
+    setProofState("uploading");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const up = await api.post("/upload", fd);
+      await api.post(`/subscription/order/${manualOrder.order_id}/proof`, { proofUrl: up.data.path });
+      setProofState("done");
+      toast.success("Bukti pembayaran terkirim. Menunggu verifikasi admin.");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Gagal mengunggah bukti pembayaran");
+      setProofState("idle");
+    }
+  };
+
+  const checkManualStatus = async () => {
+    if (!manualOrder) return;
+    try {
+      const { data } = await api.get(`/subscription/order/${manualOrder.order_id}`);
+      if (data.status === "paid") {
+        setManualOpen(false);
+        await onPaid();
+      } else if (data.status === "rejected") {
+        toast.error("Bukti pembayaran ditolak admin. Silakan unggah ulang bukti yang benar.");
+        setProofState("idle");
+      } else {
+        toast.info("Pembayaran masih menunggu verifikasi admin.");
+      }
+    } catch {
+      toast.error("Gagal memeriksa status");
+    }
+  };
+
   const settle = async (orderId) => {
     const ok = await pollOrder(orderId);
     if (ok) { await onPaid(); }
@@ -102,6 +165,9 @@ export default function Pricing() {
   };
 
   const upgrade = async (plan) => {
+    if (pricing?.paymentMethod === "manual") {
+      return manualPay(plan);
+    }
     setBusy(true);
     try {
       const { data } = await api.post("/subscription/checkout", { plan });
@@ -200,15 +266,87 @@ export default function Pricing() {
                   <Button data-testid="btn-upgrade-yearly" variant="outline" onClick={() => upgrade("yearly")} disabled={busy} className="w-full border-amber-300 text-amber-700 hover:bg-amber-50">
                     Bayar Tahunan · {rupiah(yEff)} (Hemat)
                   </Button>
-                  <p className="flex items-center justify-center gap-1.5 text-[11px] text-slate-400 pt-1">
-                    <ShieldCheck className="w-3.5 h-3.5" /> Pembayaran aman via Midtrans — QRIS, GoPay & VA Bank
-                  </p>
+                  {pricing?.paymentMethod === "manual" ? (
+                    <p className="flex items-center justify-center gap-1.5 text-[11px] text-slate-400 pt-1" data-testid="pay-note-manual">
+                      <QrCode className="w-3.5 h-3.5" /> Pembayaran manual via QRIS — Premium aktif setelah diverifikasi admin
+                    </p>
+                  ) : (
+                    <p className="flex items-center justify-center gap-1.5 text-[11px] text-slate-400 pt-1">
+                      <ShieldCheck className="w-3.5 h-3.5" /> Pembayaran aman via Midtrans — QRIS, GoPay & VA Bank
+                    </p>
+                  )}
                 </div>
               )}
             </Card>
           </motion.div>
         </div>
       </main>
+
+      <Dialog open={manualOpen} onOpenChange={setManualOpen}>
+        <DialogContent className="bg-white max-w-sm" data-testid="manual-pay-dialog">
+          <DialogHeader>
+            <DialogTitle className="font-display text-xl flex items-center gap-2"><QrCode className="w-5 h-5 text-amber-600" /> Pembayaran via QRIS</DialogTitle>
+          </DialogHeader>
+          {manualOrder && (
+            <div className="space-y-4">
+              <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-center">
+                <div className="text-[11px] text-amber-700 font-medium">{manualOrder.label}</div>
+                <div className="font-mono font-extrabold text-2xl text-slate-900" data-testid="manual-amount">{rupiah(manualOrder.gross_amount)}</div>
+                <div className="text-[10px] text-slate-400 mt-0.5">Order: {manualOrder.order_id}</div>
+              </div>
+
+              {pricing?.qrisImage ? (
+                <div className="flex justify-center">
+                  <img src={fileUrl(pricing.qrisImage)} alt="QRIS Pembayaran" data-testid="qris-image" className="w-56 h-56 rounded-lg border border-slate-200 object-contain bg-white" />
+                </div>
+              ) : (
+                <div className="rounded-lg border-2 border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">
+                  Gambar QRIS belum diatur admin. Silakan hubungi admin.
+                </div>
+              )}
+
+              <ol className="text-xs text-slate-600 space-y-1.5 list-decimal list-inside">
+                <li>Scan QRIS di atas dengan aplikasi e-wallet/m-banking Anda</li>
+                <li>Bayar <b>persis</b> sebesar nominal di atas</li>
+                <li>Unggah bukti pembayaran (screenshot) di bawah ini</li>
+              </ol>
+              {pricing?.paymentNote && (
+                <p className="text-[11px] text-slate-500 bg-slate-50 rounded-lg border border-slate-200 px-3 py-2" data-testid="payment-note">{pricing.paymentNote}</p>
+              )}
+
+              {proofState === "done" ? (
+                <div className="rounded-lg bg-green-50 border border-green-200 p-4 text-center space-y-2" data-testid="proof-done">
+                  <BadgeCheck className="w-8 h-8 text-green-600 mx-auto" />
+                  <div className="text-sm font-semibold text-green-800">Bukti terkirim!</div>
+                  <p className="text-xs text-green-700 flex items-center justify-center gap-1"><Hourglass className="w-3.5 h-3.5" /> Premium aktif setelah admin memverifikasi pembayaran Anda.</p>
+                  <Button size="sm" variant="outline" data-testid="check-status-btn" onClick={checkManualStatus} className="border-green-300 text-green-700 hover:bg-green-100">Cek Status Verifikasi</Button>
+                </div>
+              ) : (
+                <div>
+                  <input
+                    ref={proofRef}
+                    type="file"
+                    accept="image/*,application/pdf"
+                    className="hidden"
+                    data-testid="proof-file-input"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) submitProof(f); e.target.value = ""; }}
+                  />
+                  <Button
+                    data-testid="proof-upload-btn"
+                    onClick={() => proofRef.current?.click()}
+                    disabled={proofState === "uploading"}
+                    className="w-full bg-amber-600 hover:bg-amber-700 text-white gap-2"
+                  >
+                    {proofState === "uploading" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    {proofState === "uploading" ? "Mengunggah bukti..." : "Unggah Bukti Pembayaran"}
+                  </Button>
+                  <p className="text-[10px] text-slate-400 text-center mt-1.5">Gambar/PDF, maks 2 MB</p>
+                </div>
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

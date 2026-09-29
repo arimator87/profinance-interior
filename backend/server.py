@@ -755,6 +755,62 @@ async def list_orders(user: dict = Depends(get_current_user)):
     return orders
 
 
+# ---------- Manual payment (QRIS pribadi, verifikasi admin) ----------
+@api.post("/subscription/checkout-manual")
+async def create_manual_checkout(body: CheckoutIn, user: dict = Depends(get_current_user)):
+    """Buat order pembayaran manual (QRIS pribadi). Aktif hanya bila paymentMethod == 'manual'."""
+    plan = PREMIUM_PLANS.get(body.plan)
+    if not plan:
+        raise HTTPException(status_code=400, detail="Paket tidak valid")
+    settings = await _get_settings()
+    if settings.get("paymentMethod") != "manual":
+        raise HTTPException(status_code=400, detail="Metode pembayaran manual tidak aktif")
+    promo_active = _promo_active(settings)
+    if body.plan == "monthly":
+        amount = _effective_price(settings.get("monthlyPrice", plan["amount"]),
+                                  settings.get("monthlyPromo", 0), promo_active)
+    else:
+        amount = _effective_price(settings.get("yearlyPrice", plan["amount"]),
+                                  settings.get("yearlyPromo", 0), promo_active)
+    if amount <= 0:
+        amount = plan["amount"]
+    order_id = f"PF-{user['user_id'][:12]}-{uuid.uuid4().hex[:10]}"
+    await db.orders.insert_one({
+        "order_id": order_id, "user_id": user["user_id"], "plan": body.plan,
+        "plan_days": plan["days"], "gross_amount": amount, "status": "pending_review",
+        "payment_method": "manual", "proofUrl": None, "proofSubmittedAt": None,
+        "premium_until": None, "created_at": now_iso(), "last_notification": None,
+    })
+    return {
+        "order_id": order_id, "plan": body.plan, "label": plan["label"],
+        "gross_amount": amount, "status": "pending_review",
+    }
+
+
+class ProofIn(BaseModel):
+    proofUrl: str
+
+
+@api.post("/subscription/order/{order_id}/proof")
+async def submit_payment_proof(order_id: str, body: ProofIn, user: dict = Depends(get_current_user)):
+    """User mengunggah bukti pembayaran manual (QRIS pribadi)."""
+    order = await db.orders.find_one({"order_id": order_id, "user_id": user["user_id"]}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order tidak ditemukan")
+    if order.get("payment_method") != "manual":
+        raise HTTPException(status_code=400, detail="Order ini bukan pembayaran manual")
+    if order.get("status") not in {"pending_review", "rejected"}:
+        raise HTTPException(status_code=400, detail="Order sudah diproses")
+    proof = (body.proofUrl or "").strip()
+    if not proof:
+        raise HTTPException(status_code=400, detail="Bukti pembayaran wajib diunggah")
+    await db.orders.update_one(
+        {"order_id": order_id},
+        {"$set": {"proofUrl": proof, "status": "pending_review", "proofSubmittedAt": now_iso()}},
+    )
+    return {"ok": True, "status": "pending_review"}
+
+
 # ---------- Admin settings ----------
 SETTINGS_ID = "app_settings"
 DEFAULT_SETTINGS = {
@@ -774,6 +830,9 @@ DEFAULT_SETTINGS = {
     "blogAutoIntervalHours": 72,
     "blogLastAutoAt": "",
     "blogAutoIndex": 0,
+    "paymentMethod": "midtrans",
+    "qrisImage": "",
+    "paymentNote": "",
 }
 
 
@@ -792,12 +851,67 @@ class SettingsIn(BaseModel):
     promoEndsAt: Optional[str] = None
     blogAutoEnabled: Optional[bool] = None
     blogAutoIntervalHours: Optional[int] = None
+    paymentMethod: Optional[Literal["midtrans", "manual"]] = None
+    qrisImage: Optional[str] = None
+    paymentNote: Optional[str] = None
 
 
 async def require_admin(user: dict = Depends(get_current_user)):
     if (user.get("email") or "").strip().lower() not in OWNER_EMAILS:
         raise HTTPException(status_code=403, detail="Akses khusus admin")
     return user
+
+
+# ---------- Admin: verifikasi pembayaran manual (QRIS pribadi) ----------
+@api.get("/admin/manual-orders")
+async def admin_manual_orders(status: str = "pending_review", user: dict = Depends(require_admin)):
+    """Daftar order pembayaran manual untuk diverifikasi admin."""
+    q = {"payment_method": "manual"}
+    if status and status != "all":
+        q["status"] = status
+    orders = await db.orders.find(q, {"_id": 0, "last_notification": 0, "snap_token": 0, "redirect_url": 0}).sort("created_at", -1).to_list(200)
+    uids = list({o["user_id"] for o in orders})
+    users = await db.users.find({"user_id": {"$in": uids}}, {"_id": 0, "user_id": 1, "name": 1, "email": 1}).to_list(500) if uids else []
+    umap = {u["user_id"]: u for u in users}
+    out = []
+    for o in orders:
+        u = umap.get(o["user_id"], {})
+        out.append({**o, "userName": u.get("name", ""), "userEmail": u.get("email", "")})
+    return out
+
+
+@api.post("/admin/orders/{order_id}/approve")
+async def admin_approve_order(order_id: str, user: dict = Depends(require_admin)):
+    """Admin menyetujui pembayaran manual -> premium aktif (idempotent)."""
+    order = await db.orders.find_one({"order_id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order tidak ditemukan")
+    if order.get("status") == "paid":
+        return {"ok": True, "already": True, "premium_until": order.get("premium_until")}
+    res = await db.orders.update_one(
+        {"order_id": order_id, "status": {"$ne": "paid"}},
+        {"$set": {"status": "paid", "paid_at": now_iso(), "approvedBy": user.get("email")}},
+    )
+    expiry = order.get("premium_until")
+    if res.modified_count:
+        expiry = await _activate_premium(order)
+        await db.orders.update_one({"order_id": order_id}, {"$set": {"premium_until": expiry}})
+    return {"ok": True, "premium_until": expiry}
+
+
+@api.post("/admin/orders/{order_id}/reject")
+async def admin_reject_order(order_id: str, user: dict = Depends(require_admin)):
+    """Admin menolak bukti pembayaran manual."""
+    order = await db.orders.find_one({"order_id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order tidak ditemukan")
+    if order.get("status") == "paid":
+        raise HTTPException(status_code=400, detail="Order sudah lunas, tidak dapat ditolak")
+    await db.orders.update_one(
+        {"order_id": order_id},
+        {"$set": {"status": "rejected", "rejectedBy": user.get("email")}},
+    )
+    return {"ok": True}
 
 
 async def _get_settings() -> dict:
@@ -902,6 +1016,7 @@ async def public_settings():
     keys = (
         "appName", "announcement", "announcementTheme", "maintenanceMode", "supportWhatsapp", "supportEmail",
         "monthlyPrice", "monthlyPromo", "yearlyPrice", "yearlyPromo", "promoActive", "promoEndsAt",
+        "paymentMethod", "qrisImage", "paymentNote",
     )
     return {**{k: s[k] for k in keys}, "serverNow": now_iso()}
 

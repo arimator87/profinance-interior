@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
-import { ArrowLeft, Settings, Loader2, ShieldCheck, Save, Tag, Trash2, Image as ImageIcon, Plus, RefreshCw } from "lucide-react";
+import { ArrowLeft, Settings, Loader2, ShieldCheck, Save, Tag, Trash2, Image as ImageIcon, Plus, RefreshCw, QrCode, CreditCard, Banknote, Eye, CheckCircle2, XCircle } from "lucide-react";
 import { rupiah } from "@/lib/format";
 import { toast } from "sonner";
 
@@ -71,6 +71,7 @@ export default function AdminSettings() {
         setLoading(false);
       }
       loadCats();
+      loadManualOrders();
     })();
   }, [isAdmin, navigate]);
 
@@ -165,6 +166,37 @@ export default function AdminSettings() {
     } finally {
       setSaving(false);
     }
+  };
+
+  // ---- Pembayaran manual (QRIS pribadi) ----
+  const [manualOrders, setManualOrders] = useState([]);
+  const [orderBusy, setOrderBusy] = useState(null);
+  const qrisFileRef = useRef(null);
+
+  const loadManualOrders = async () => {
+    try {
+      const { data } = await api.get("/admin/manual-orders?status=pending_review");
+      setManualOrders(data);
+    } catch { /* abaikan */ }
+  };
+
+  const reviewOrder = async (orderId, action) => {
+    setOrderBusy(orderId + action);
+    try {
+      await api.post(`/admin/orders/${orderId}/${action}`);
+      toast.success(action === "approve" ? "Pembayaran disetujui — Premium pengguna aktif" : "Pembayaran ditolak");
+      loadManualOrders();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Gagal memproses order");
+    } finally {
+      setOrderBusy(null);
+    }
+  };
+
+  const planLabel = (p) => (p === "yearly" ? "Premium Tahunan" : "Premium Bulanan");
+  const fmtDate = (iso) => {
+    try { return new Date(iso).toLocaleString("id-ID", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }); }
+    catch { return "-"; }
   };
 
   return (
@@ -298,6 +330,132 @@ export default function AdminSettings() {
                 <p className="text-[11px] text-slate-400">{priceHint(form.yearlyPrice, form.yearlyPromo, form.promoActive)}</p>
               </div>
             </Card>
+
+            <Card className="p-6 border-slate-200 bg-white space-y-4" data-testid="payment-method-card">
+              <div className="flex items-center gap-2">
+                <CreditCard className="w-4 h-4 text-amber-600" />
+                <h3 className="font-display font-bold text-slate-900">Metode Pembayaran</h3>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  data-testid="paymethod-midtrans"
+                  onClick={() => set("paymentMethod", "midtrans")}
+                  className={`rounded-lg border-2 px-3.5 py-3 text-left transition-all ${
+                    (form.paymentMethod || "midtrans") === "midtrans"
+                      ? "border-slate-900 bg-slate-50"
+                      : "border-slate-200 bg-white hover:border-slate-300"
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-800"><CreditCard className="w-4 h-4 text-slate-500" /> Midtrans (Otomatis)</div>
+                  <div className="text-[11px] text-slate-400 mt-1">QRIS/GoPay/VA via Midtrans. Premium aktif otomatis setelah lunas.</div>
+                </button>
+                <button
+                  type="button"
+                  data-testid="paymethod-manual"
+                  onClick={() => set("paymentMethod", "manual")}
+                  className={`rounded-lg border-2 px-3.5 py-3 text-left transition-all ${
+                    form.paymentMethod === "manual"
+                      ? "border-amber-500 bg-amber-50/70"
+                      : "border-slate-200 bg-white hover:border-slate-300"
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-800"><QrCode className="w-4 h-4 text-amber-600" /> Manual (QRIS Pribadi)</div>
+                  <div className="text-[11px] text-slate-400 mt-1">Pelanggan scan QRIS Anda & unggah bukti. Anda verifikasi manual.</div>
+                </button>
+              </div>
+
+              {form.paymentMethod === "manual" && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-4 space-y-3" data-testid="qris-config">
+                  <div>
+                    <Label className="text-slate-700">Gambar QRIS Pribadi Anda</Label>
+                    <div className="mt-1.5 flex items-center gap-3">
+                      {form.qrisImage ? (
+                        <img src={fileUrl(form.qrisImage)} alt="QRIS" data-testid="qris-preview" className="w-24 h-24 rounded-lg border border-slate-200 object-contain bg-white" />
+                      ) : (
+                        <div className="w-24 h-24 rounded-lg border-2 border-dashed border-slate-300 flex items-center justify-center bg-white">
+                          <QrCode className="w-7 h-7 text-slate-300" />
+                        </div>
+                      )}
+                      <div className="space-x-2">
+                        <input
+                          ref={qrisFileRef}
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          data-testid="qris-file-input"
+                          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImagePick(f, (p) => set("qrisImage", p), "qris"); e.target.value = ""; }}
+                        />
+                        <Button type="button" size="sm" variant="outline" data-testid="qris-upload-btn" disabled={catBusy === "qris"} onClick={() => qrisFileRef.current?.click()} className="gap-1.5 border-slate-300">
+                          {catBusy === "qris" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ImageIcon className="w-3.5 h-3.5" />}
+                          {form.qrisImage ? "Ganti QRIS" : "Unggah QRIS"}
+                        </Button>
+                        {form.qrisImage && (
+                          <Button type="button" size="sm" variant="ghost" data-testid="qris-remove-btn" onClick={() => set("qrisImage", "")} className="text-red-500 hover:text-red-600">Hapus</Button>
+                        )}
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1.5">Gambar ini ditampilkan ke pelanggan saat checkout. Format JPG/PNG, maks 2 MB.</p>
+                  </div>
+                  <div>
+                    <Label className="text-slate-700">Catatan Instruksi (opsional)</Label>
+                    <Textarea
+                      data-testid="setting-payment-note"
+                      value={form.paymentNote || ""}
+                      onChange={(e) => set("paymentNote", e.target.value)}
+                      className="mt-1 bg-white"
+                      rows={2}
+                      placeholder="Contoh: Scan QRIS di atas, bayar sesuai nominal, lalu unggah bukti pembayaran. Premium aktif setelah admin verifikasi (maks 1x24 jam)."
+                    />
+                  </div>
+                  <p className="text-[11px] text-amber-700 flex items-center gap-1"><ShieldCheck className="w-3.5 h-3.5" /> Jangan lupa klik &ldquo;Simpan Pengaturan&rdquo; di bawah setelah mengubah metode/QRIS.</p>
+                </div>
+              )}
+            </Card>
+
+            {(form.paymentMethod === "manual" || manualOrders.length > 0) && (
+              <Card className="p-6 border-slate-200 bg-white space-y-3" data-testid="manual-orders-card">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Banknote className="w-4 h-4 text-amber-600" />
+                    <h3 className="font-display font-bold text-slate-900">Verifikasi Pembayaran Manual</h3>
+                  </div>
+                  <button onClick={loadManualOrders} className="text-slate-400 hover:text-amber-600" title="Muat ulang"><RefreshCw className="w-4 h-4" /></button>
+                </div>
+                {manualOrders.length === 0 ? (
+                  <p className="text-sm text-slate-400" data-testid="manual-orders-empty">Tidak ada pembayaran yang menunggu verifikasi.</p>
+                ) : (
+                  <div className="space-y-2.5">
+                    {manualOrders.map((o) => (
+                      <div key={o.order_id} className="rounded-lg border border-slate-200 p-3.5" data-testid={`manual-order-${o.order_id}`}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-slate-900 truncate">{o.userName || o.userEmail} <span className="font-normal text-slate-400">· {planLabel(o.plan)}</span></div>
+                            <div className="text-xs text-slate-500 mt-0.5">{o.userEmail} · {fmtDate(o.created_at)}</div>
+                            <div className="font-mono font-bold text-amber-700 mt-1">{rupiah(o.gross_amount)}</div>
+                          </div>
+                          {o.proofUrl ? (
+                            <a href={fileUrl(o.proofUrl)} target="_blank" rel="noreferrer" data-testid={`proof-link-${o.order_id}`} className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline shrink-0">
+                              <Eye className="w-3.5 h-3.5" /> Lihat Bukti
+                            </a>
+                          ) : (
+                            <span className="text-[11px] text-slate-400 shrink-0">Belum ada bukti</span>
+                          )}
+                        </div>
+                        <div className="flex gap-2 mt-2.5">
+                          <Button size="sm" data-testid={`approve-order-${o.order_id}`} disabled={orderBusy === o.order_id + "approve"} onClick={() => reviewOrder(o.order_id, "approve")} className="flex-1 h-8 text-xs bg-green-600 hover:bg-green-700 text-white gap-1">
+                            {orderBusy === o.order_id + "approve" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />} Setujui & Aktifkan
+                          </Button>
+                          <Button size="sm" variant="outline" data-testid={`reject-order-${o.order_id}`} disabled={orderBusy === o.order_id + "reject"} onClick={() => reviewOrder(o.order_id, "reject")} className="h-8 text-xs border-red-200 text-red-600 hover:bg-red-50 gap-1">
+                            {orderBusy === o.order_id + "reject" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />} Tolak
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Card>
+            )}
 
             <Card className="p-6 border-slate-200 bg-white space-y-4" data-testid="work-categories-card">
               <div className="flex items-center gap-2">
